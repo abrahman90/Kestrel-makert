@@ -705,6 +705,7 @@ const TIMEFRAME_SECONDS: Record<Timeframe, number> = {
   '4h': 14400,
   '1D': 86400,
   '1W': 604800,
+  '1M': 2592000,
 };
 
 function seededRandom(seed: number): () => number {

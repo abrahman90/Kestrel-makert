@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
   Crosshair,
   Edit3,
   Eye,
@@ -13,16 +15,19 @@ import {
   X,
 } from 'lucide-react';
 import { getDrawingToolDef } from '../../data/drawingToolsCatalog';
-import { ChartDrawing } from '../../types/market';
+import { ChartDrawing, Timeframe } from '../../types/market';
 import { Input, Select } from '../ui/DesignSystem';
+import { VisualOrderAction } from './DrawingContextualToolbar';
 
 interface DrawingObjectManagerProps {
   drawings: ChartDrawing[];
   selectedId: string | null;
+  currentTimeframe?: Timeframe;
   onSelectDrawing: (id: string) => void;
   onLocateDrawing: (drawing: ChartDrawing) => void;
   onUpdateDrawing: (id: string, patch: Partial<ChartDrawing>) => void;
   onBatchUpdateDrawings?: (ids: string[], patch: Partial<ChartDrawing>) => void;
+  onVisualOrder?: (id: string, action: VisualOrderAction) => void;
   onDeleteDrawing: (id: string) => void;
   onClose?: () => void;
 }
@@ -30,10 +35,12 @@ interface DrawingObjectManagerProps {
 export function DrawingObjectManager({
   drawings,
   selectedId,
+  currentTimeframe,
   onSelectDrawing,
   onLocateDrawing,
   onUpdateDrawing,
   onBatchUpdateDrawings,
+  onVisualOrder,
   onDeleteDrawing,
   onClose,
 }: DrawingObjectManagerProps) {
@@ -227,7 +234,7 @@ export function DrawingObjectManager({
                                 {item.name}
                               </div>
                             )}
-                            <div className="text-[10px] text-[var(--text-muted)] capitalize flex items-center gap-1.5">
+                            <div className="text-[10px] text-[var(--text-muted)] capitalize flex flex-wrap items-center gap-1.5">
                               <span>{item.category}</span>
                               <span>·</span>
                               <select
@@ -246,6 +253,17 @@ export function DrawingObjectManager({
                                 <option value="Trade Setups" className="bg-[var(--bg-surface)]">Trade Setups</option>
                                 <option value="Annotations" className="bg-[var(--bg-surface)]">Annotations</option>
                               </select>
+                              {item.visibleIntervals && item.visibleIntervals.length > 0 && (
+                                <span
+                                  className={`font-mono ${
+                                    currentTimeframe && !item.visibleIntervals.includes(currentTimeframe)
+                                      ? 'text-[#F0B90B]'
+                                      : 'text-[var(--text-muted)]'
+                                  }`}
+                                >
+                                  · {item.visibleIntervals.join(',')}
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -254,6 +272,26 @@ export function DrawingObjectManager({
                           className="flex items-center gap-0.5 shrink-0"
                           onClick={(e) => e.stopPropagation()}
                         >
+                          {onVisualOrder && (
+                            <>
+                              <button
+                                type="button"
+                                title="Bring Forward"
+                                onClick={() => onVisualOrder(item.id, 'forward')}
+                                className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                              >
+                                <ArrowUp className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                title="Send Backward"
+                                onClick={() => onVisualOrder(item.id, 'backward')}
+                                className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                              >
+                                <ArrowDown className="w-3 h-3" />
+                              </button>
+                            </>
+                          )}
                           <button
                             type="button"
                             title="Rename"

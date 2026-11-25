@@ -13,6 +13,7 @@ import {
   DEFAULT_FIB_LEVELS,
   getDrawingToolDef,
 } from '../../data/drawingToolsCatalog';
+import { getDefaultConfigForTool } from '../../data/drawingTemplatesCatalog';
 import {
   calculateBollingerBands,
   calculateEMA,
@@ -22,6 +23,13 @@ import {
   calculateSMA,
   formatPrice,
 } from '../../utils/indicators';
+import {
+  computePositionMetrics,
+  formatMetricNumber,
+  getInstrumentTickMeta,
+} from '../../utils/positionMetrics';
+import { SelectionBounds } from './DrawingContextualToolbar';
+import { DrawingTemplate, PositionDrawingData } from '../../types/market';
 
 export interface ChartVisualSettings {
   showGrid: boolean;
@@ -46,10 +54,12 @@ interface TradingChartCanvasProps {
   compareCandles: Candle[] | null;
   activeTool: DrawingTool;
   drawings: ChartDrawing[];
+  templates: DrawingTemplate[];
   selectedDrawingId: string | null;
   onSelectDrawing: (id: string | null) => void;
   onAddDrawing: (drawing: Omit<ChartDrawing, 'id' | 'name' | 'groupName'>) => void;
   onUpdateDrawing: (id: string, patch: Partial<ChartDrawing>, recordHistory?: boolean) => void;
+  onSelectionBoundsChange?: (bounds: SelectionBounds | null) => void;
   magnetMode: boolean;
   hideAllDrawings: boolean;
   crosshairEnabled: boolean;
@@ -63,6 +73,22 @@ interface TradingChartCanvasProps {
 interface PendingPoint {
   index: number;
   price: number;
+}
+
+type PositionHandleKind = 'tp' | 'sl' | 'entry' | 'left_time' | 'right_time';
+
+interface HoveredHandleInfo {
+  drawingId: string;
+  handle: PositionHandleKind | number;
+  x: number;
+  y: number;
+  label: string;
+}
+
+function isDrawingVisibleOnTimeframe(d: ChartDrawing, tf: Timeframe): boolean {
+  if (!d.visible) return false;
+  if (!d.visibleIntervals || d.visibleIntervals.length === 0) return true;
+  return d.visibleIntervals.includes(tf);
 }
 
 function applyLineStyle(ctx: CanvasRenderingContext2D, style: LineStyle) {
@@ -108,10 +134,12 @@ export function TradingChartCanvas({
   compareCandles,
   activeTool,
   drawings,
+  templates,
   selectedDrawingId,
   onSelectDrawing,
   onAddDrawing,
   onUpdateDrawing,
+  onSelectionBoundsChange,
   magnetMode,
   hideAllDrawings,
   crosshairEnabled,
@@ -128,6 +156,8 @@ export function TradingChartCanvas({
   const [visibleCount, setVisibleCount] = useState(85);
   const [rightOffset, setRightOffset] = useState(0);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
+  const [hoveredDrawingId, setHoveredDrawingId] = useState<string | null>(null);
+  const [hoveredHandle, setHoveredHandle] = useState<HoveredHandleInfo | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef<{ x: number; startOffset: number } | null>(null);
 
@@ -142,7 +172,7 @@ export function TradingChartCanvas({
     value: string;
   } | null>(null);
 
-  // Anchor or Body Dragging state
+  // Anchor, Position Handle, or Body Dragging state
   const [dragState, setDragState] = useState<
     | {
         mode: 'anchor';
@@ -150,10 +180,18 @@ export function TradingChartCanvas({
         pointIndex: number;
       }
     | {
+        mode: 'position_handle';
+        drawingId: string;
+        handle: PositionHandleKind;
+        origPos: PositionDrawingData;
+        startPt: PendingPoint;
+      }
+    | {
         mode: 'body';
         drawingId: string;
         startPt: PendingPoint;
         origPoints: PendingPoint[];
+        origPos?: PositionDrawingData;
       }
     | null
   >(null);
@@ -384,18 +422,161 @@ export function TradingChartCanvas({
     }
   }, [hoveredBarIndex, displayCandles, onHoverCandle]);
 
-  // Hit-testing for selecting drawings
+  const resolvePositionData = (d: Pick<ChartDrawing, 'tool' | 'points' | 'positionData'>): PositionDrawingData | null => {
+    if (d.tool !== 'long_position' && d.tool !== 'short_position') return null;
+    if (d.positionData) return d.positionData;
+    const p0 = d.points[0];
+    const p1 = d.points[1];
+    if (!p0) return null;
+    const isLong = d.tool === 'long_position';
+    const meta = getInstrumentTickMeta(instrument);
+    const span = Math.max(meta.pipSize * 10, (maxPrice - minPrice) * 0.12);
+    const tp = p1
+      ? isLong
+        ? Math.max(p1.price, p0.price + span * 0.5)
+        : Math.min(p1.price, p0.price - span * 0.5)
+      : isLong
+      ? p0.price + span
+      : Math.max(0.0001, p0.price - span);
+    const sl = isLong
+      ? Math.max(0.0001, p0.price - Math.abs(tp - p0.price) * 0.5)
+      : p0.price + Math.abs(p0.price - tp) * 0.5;
+    const sIdx = p1 ? Math.min(p0.index, p1.index) : p0.index;
+    const eIdx = p1 ? Math.max(sIdx + 10, Math.max(p0.index, p1.index)) : Math.min(totalBars - 1, sIdx + 14);
+    return {
+      entryPrice: p0.price,
+      takeProfit: tp,
+      stopLoss: sl,
+      startIndex: sIdx,
+      endIndex: eIdx,
+      positionSize: meta.defaultPositionSize,
+      profitColor: '#089981',
+      lossColor: '#F23645',
+      entryColor: '#2962FF',
+    };
+  };
+
+  const getPositionHandles = (d: ChartDrawing): HoveredHandleInfo[] => {
+    const pos = resolvePositionData(d);
+    if (!pos) return [];
+    const leftX = indexToX(pos.startIndex);
+    const rightX = Math.max(leftX + 52, indexToX(pos.endIndex));
+    const midX = (leftX + rightX) / 2;
+    const entryY = priceToY(pos.entryPrice);
+    const tpY = priceToY(pos.takeProfit);
+    const slY = priceToY(pos.stopLoss);
+
+    return [
+      { drawingId: d.id, handle: 'tp', x: midX, y: tpY, label: 'Take Profit' },
+      { drawingId: d.id, handle: 'sl', x: midX, y: slY, label: 'Stop Loss' },
+      { drawingId: d.id, handle: 'entry', x: midX, y: entryY, label: 'Entry Price' },
+      { drawingId: d.id, handle: 'left_time', x: leftX, y: entryY, label: 'Start Time' },
+      { drawingId: d.id, handle: 'right_time', x: rightX, y: entryY, label: 'End Time' },
+    ];
+  };
+
+  // Report selection bounds so Contextual Toolbar sits close to the selected object without covering it
+  useEffect(() => {
+    if (!onSelectionBoundsChange) return;
+    if (!selectedDrawingId || hideAllDrawings) {
+      onSelectionBoundsChange(null);
+      return;
+    }
+    const sel = drawings.find((d) => d.id === selectedDrawingId);
+    if (!sel || !isDrawingVisibleOnTimeframe(sel, timeframe) || sel.points.length === 0) {
+      onSelectionBoundsChange(null);
+      return;
+    }
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    if (sel.tool === 'long_position' || sel.tool === 'short_position') {
+      const pos = resolvePositionData(sel);
+      if (pos) {
+        const lx = indexToX(pos.startIndex);
+        const rx = Math.max(lx + 52, indexToX(pos.endIndex));
+        const ty = priceToY(pos.takeProfit);
+        const sy = priceToY(pos.stopLoss);
+        const ey = priceToY(pos.entryPrice);
+        minX = Math.min(lx, rx);
+        maxX = Math.max(lx, rx);
+        minY = Math.min(ty, sy, ey);
+        maxY = Math.max(ty, sy, ey);
+      }
+    } else if (sel.tool === 'horizontal' || sel.tool === 'horizontal_ray') {
+      const y0 = priceToY(sel.points[0].price);
+      const x0 = sel.tool === 'horizontal' ? plotWidth * 0.25 : indexToX(sel.points[0].index);
+      minX = x0;
+      maxX = Math.min(plotWidth, x0 + 240);
+      minY = y0 - 8;
+      maxY = y0 + 8;
+    } else {
+      sel.points.forEach((pt) => {
+        const ax = indexToX(pt.index);
+        const ay = priceToY(pt.price);
+        minX = Math.min(minX, ax);
+        maxX = Math.max(maxX, ax);
+        minY = Math.min(minY, ay);
+        maxY = Math.max(maxY, ay);
+      });
+    }
+
+    if (!Number.isFinite(minX)) {
+      onSelectionBoundsChange(null);
+      return;
+    }
+    onSelectionBoundsChange({
+      left: minX,
+      right: maxX,
+      top: minY,
+      bottom: maxY,
+      containerWidth: size.width,
+      containerHeight: size.height,
+    });
+  }, [
+    selectedDrawingId,
+    drawings,
+    timeframe,
+    hideAllDrawings,
+    size.width,
+    size.height,
+    startIndex,
+    endIndex,
+    minPrice,
+    maxPrice,
+    onSelectionBoundsChange,
+  ]);
+
+  // Hit-testing for selecting & hovering drawings
   const hitTestDrawing = (px: number, py: number): string | null => {
     if (hideAllDrawings) return null;
     for (let i = drawings.length - 1; i >= 0; i--) {
       const d = drawings[i];
-      if (!d.visible || d.points.length === 0) continue;
+      if (!isDrawingVisibleOnTimeframe(d, timeframe) || d.points.length === 0) continue;
+
+      if (d.tool === 'long_position' || d.tool === 'short_position') {
+        const handles = getPositionHandles(d);
+        for (const h of handles) {
+          if (Math.hypot(px - h.x, py - h.y) <= 12) return d.id;
+        }
+        const pos = resolvePositionData(d);
+        if (pos) {
+          const lx = indexToX(pos.startIndex);
+          const rx = Math.max(lx + 52, indexToX(pos.endIndex));
+          const minY = Math.min(priceToY(pos.takeProfit), priceToY(pos.stopLoss), priceToY(pos.entryPrice)) - 6;
+          const maxY = Math.max(priceToY(pos.takeProfit), priceToY(pos.stopLoss), priceToY(pos.entryPrice)) + 6;
+          if (px >= lx - 6 && px <= rx + 6 && py >= minY && py <= maxY) return d.id;
+        }
+        continue;
+      }
 
       // Anchor point quick hit
       for (const pt of d.points) {
         const ax = indexToX(pt.index);
         const ay = priceToY(pt.price);
-        if (Math.hypot(px - ax, py - ay) <= 10) return d.id;
+        if (Math.hypot(px - ax, py - ay) <= 12) return d.id;
       }
 
       const p0 = d.points[0];
@@ -420,8 +601,6 @@ export function TradingChartCanvas({
           d.tool === 'gann_box' ||
           d.tool === 'gann_square' ||
           d.tool === 'gann_square_fixed' ||
-          d.tool === 'long_position' ||
-          d.tool === 'short_position' ||
           d.tool === 'date_price_range' ||
           d.tool === 'measure' ||
           d.tool === 'fixed_range_vp'
@@ -435,7 +614,6 @@ export function TradingChartCanvas({
           const r = Math.hypot(x1 - x0, y1 - y0);
           if (Math.abs(Math.hypot(px - x0, py - y0) - r) <= 12) return d.id;
         } else {
-          // Segment checks across consecutive points
           for (let k = 0; k < d.points.length - 1; k++) {
             const ax = indexToX(d.points[k].index);
             const ay = priceToY(d.points[k].price);
@@ -445,8 +623,7 @@ export function TradingChartCanvas({
           }
         }
       } else {
-        // Single-point annotations / VWAP / markers
-        if (Math.hypot(px - x0, py - y0) <= 22) return d.id;
+        if (Math.hypot(px - x0, py - y0) <= 24) return d.id;
       }
     }
     return null;
@@ -544,7 +721,9 @@ export function TradingChartCanvas({
 
       const d = new Date(c.time * 1000);
       const label =
-        timeframe === '1D' || timeframe === '1W'
+        timeframe === '1M'
+          ? d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' })
+          : timeframe === '1D' || timeframe === '1W'
           ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
           : d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
       ctx.fillStyle = palette.axisText;
@@ -775,32 +954,28 @@ export function TradingChartCanvas({
     };
 
     const renderDrawing = (
-      d: Pick<
-        ChartDrawing,
-        | 'tool'
-        | 'points'
-        | 'color'
-        | 'lineWidth'
-        | 'lineStyle'
-        | 'opacity'
-        | 'extendLeft'
-        | 'extendRight'
-        | 'text'
-        | 'showLabels'
-        | 'fibLevels'
-        | 'tableRows'
-      >,
+      d: Partial<ChartDrawing> & {
+        tool: Exclude<DrawingTool, 'cursor'>;
+        points: { index: number; price: number }[];
+        color: string;
+        lineWidth: number;
+        lineStyle: LineStyle;
+        opacity: number;
+      },
       isSelected = false,
+      isHovered = false,
       isDraft = false
     ) => {
       if (d.points.length === 0) return;
       ctx.save();
       const alpha = isDraft ? 0.85 : d.opacity ?? 1;
       const strokeColor = hexToRgba(d.color, alpha);
-      const fillColor = hexToRgba(d.color, Math.max(0.08, alpha * 0.14));
+      const baseFillHex = d.fillColor || d.color;
+      const fillAlpha = d.fillOpacity !== undefined ? d.fillOpacity : Math.max(0.08, alpha * 0.14);
+      const fillColor = hexToRgba(baseFillHex, fillAlpha);
       ctx.strokeStyle = strokeColor;
       ctx.fillStyle = strokeColor;
-      ctx.lineWidth = d.lineWidth || 1.5;
+      ctx.lineWidth = (d.lineWidth || 1.5) + (isHovered && !isSelected ? 0.8 : 0);
       applyLineStyle(ctx, d.lineStyle || 'solid');
 
       const p0 = d.points[0];
@@ -1265,41 +1440,42 @@ export function TradingChartCanvas({
           break;
         }
 
-        // --- CATEGORY F: FORECASTING ---
+        // --- CATEGORY F: FORECASTING (INDEPENDENT TP/SL/ENTRY) ---
         case 'long_position':
         case 'short_position': {
-          if (!p1) break;
-          const isLong = d.tool === 'long_position';
-          const left = Math.min(x0, x1);
-          const width = Math.max(85, Math.abs(x1 - x0));
-          const entryY = y0;
-          const targetY = isLong ? Math.min(y1, entryY - 24) : Math.max(y1, entryY + 24);
-          const stopDist = Math.abs(targetY - entryY) * 0.5;
-          const stopY = isLong ? entryY + stopDist : entryY - stopDist;
+          const pos = resolvePositionData(d);
+          if (!pos) break;
+          const left = indexToX(pos.startIndex);
+          const right = Math.max(left + 52, indexToX(pos.endIndex));
+          const width = right - left;
+          const entryY = priceToY(pos.entryPrice);
+          const tpY = priceToY(pos.takeProfit);
+          const slY = priceToY(pos.stopLoss);
+          const zoneAlpha = Math.max(0.12, alpha * 0.24);
 
-          // Target zone (green)
-          ctx.fillStyle = 'rgba(8, 153, 129, 0.22)';
-          ctx.fillRect(left, Math.min(entryY, targetY), width, Math.abs(targetY - entryY));
-          // Stop zone (red)
-          ctx.fillStyle = 'rgba(242, 54, 69, 0.22)';
-          ctx.fillRect(left, Math.min(entryY, stopY), width, Math.abs(stopY - entryY));
+          // Profit Zone (from Entry to Take Profit)
+          ctx.fillStyle = hexToRgba(pos.profitColor, zoneAlpha);
+          ctx.fillRect(left, Math.min(entryY, tpY), width, Math.abs(tpY - entryY));
 
-          ctx.strokeStyle = palette.up;
-          ctx.strokeRect(left, Math.min(entryY, targetY), width, Math.abs(targetY - entryY));
-          ctx.strokeStyle = palette.down;
-          ctx.strokeRect(left, Math.min(entryY, stopY), width, Math.abs(stopY - entryY));
+          // Loss Zone (from Entry to Stop Loss)
+          ctx.fillStyle = hexToRgba(pos.lossColor, zoneAlpha);
+          ctx.fillRect(left, Math.min(entryY, slY), width, Math.abs(slY - entryY));
 
-          const targetPrice = yToPrice(targetY);
-          const stopPrice = yToPrice(stopY);
-          const reward = Math.abs(targetPrice - p0.price);
-          const risk = Math.max(1e-9, Math.abs(p0.price - stopPrice));
-          const rr = (reward / risk).toFixed(2);
-          drawLabelPill(
-            `${isLong ? 'LONG' : 'SHORT'} R:R ${rr} · TP ${formatPrice(targetPrice, instrument.decimals)}`,
-            left + 4,
-            entryY - 10,
-            isLong ? palette.up : palette.down
-          );
+          // Profit & Loss zone borders
+          ctx.strokeStyle = hexToRgba(pos.profitColor, isHovered || isSelected ? 0.95 : 0.65);
+          ctx.strokeRect(left, Math.min(entryY, tpY), width, Math.abs(tpY - entryY));
+          ctx.strokeStyle = hexToRgba(pos.lossColor, isHovered || isSelected ? 0.95 : 0.65);
+          ctx.strokeRect(left, Math.min(entryY, slY), width, Math.abs(slY - entryY));
+
+          // Crisp Entry Horizontal Line
+          ctx.strokeStyle = hexToRgba(pos.entryColor, alpha);
+          ctx.lineWidth = Math.max(1.5, d.lineWidth || 1.5);
+          ctx.beginPath();
+          ctx.moveTo(left, entryY);
+          ctx.lineTo(right, entryY);
+          ctx.stroke();
+
+          // Notice: No permanent measurement pill clutter! Detailed R:R, Pips & Points appear cleanly on hover.
           break;
         }
         case 'bar_pattern': {
@@ -1595,17 +1771,42 @@ export function TradingChartCanvas({
 
         // --- CATEGORY J: ANNOTATIONS ---
         case 'text': {
-          ctx.font = '600 12px "Plus Jakarta Sans", sans-serif';
-          ctx.textAlign = 'left';
+          const fSize = d.fontSize || 12;
+          const fFamily = d.fontFamily || 'Plus Jakarta Sans';
+          ctx.font = `600 ${fSize}px "${fFamily}", sans-serif`;
+          ctx.textAlign = d.textAlign || 'left';
           ctx.textBaseline = 'top';
-          ctx.fillText(d.text || 'Text', x0, y0);
+          const content = d.text || 'Text';
+          if (d.backgroundColor) {
+            const tw = ctx.measureText(content).width + 12;
+            const bx =
+              ctx.textAlign === 'center'
+                ? x0 - tw / 2
+                : ctx.textAlign === 'right'
+                ? x0 - tw
+                : x0 - 4;
+            ctx.fillStyle = hexToRgba(d.backgroundColor, alpha);
+            ctx.fillRect(bx, y0 - 2, tw, fSize + 8);
+            if (d.borderColor) {
+              ctx.strokeStyle = hexToRgba(d.borderColor, alpha);
+              ctx.strokeRect(bx, y0 - 2, tw, fSize + 8);
+            }
+          }
+          ctx.fillStyle = hexToRgba(d.textColor || d.color, alpha);
+          ctx.fillText(content, x0, y0 + 2);
           break;
         }
         case 'note':
         case 'comment':
         case 'signpost': {
           const msg = d.text || (d.tool === 'note' ? 'Note' : d.tool === 'comment' ? 'Comment' : 'Signpost');
-          drawLabelPill(msg, x0, y0 - 10, d.color);
+          drawLabelPill(
+            msg,
+            x0,
+            y0 - 10,
+            d.backgroundColor || d.color,
+            d.textColor || '#FFFFFF'
+          );
           break;
         }
         case 'price_label': {
@@ -1613,7 +1814,8 @@ export function TradingChartCanvas({
             `${formatPrice(p0.price, instrument.decimals)}`,
             x0 + 6,
             y0 - 9,
-            d.color
+            d.backgroundColor || d.color,
+            d.textColor || '#FFFFFF'
           );
           ctx.beginPath();
           ctx.arc(x0, y0, 3.5, 0, Math.PI * 2);
@@ -1632,7 +1834,13 @@ export function TradingChartCanvas({
             d.tool === 'price_note'
               ? `${formatPrice(p0.price, instrument.decimals)}${d.text ? ` · ${d.text}` : ''}`
               : d.text || 'Callout';
-          drawLabelPill(label, bx, by - 9, d.color);
+          drawLabelPill(
+            label,
+            bx,
+            by - 9,
+            d.backgroundColor || d.color,
+            d.textColor || '#FFFFFF'
+          );
           break;
         }
         case 'pin':
@@ -1664,29 +1872,37 @@ export function TradingChartCanvas({
           const cellH = 18;
           const totalW = cellW * (rows[0]?.length || 2);
           const totalH = cellH * rows.length;
-          ctx.fillStyle = palette.cardBg;
+          ctx.fillStyle = d.backgroundColor || palette.cardBg;
           ctx.fillRect(x0, y0, totalW, totalH);
+          ctx.strokeStyle = d.borderColor || strokeColor;
           ctx.strokeRect(x0, y0, totalW, totalH);
-          ctx.font = '10px "IBM Plex Mono", monospace';
-          ctx.textAlign = 'left';
+          ctx.font = `${d.fontSize ? Math.min(13, d.fontSize) : 10}px "${d.fontFamily || 'IBM Plex Mono'}", monospace`;
+          ctx.textAlign = d.textAlign || 'left';
           ctx.textBaseline = 'middle';
           rows.forEach((row, rIdx) => {
             row.forEach((cell, cIdx) => {
               const cx = x0 + cIdx * cellW;
               const cy = y0 + rIdx * cellH;
               ctx.strokeRect(cx, cy, cellW, cellH);
-              ctx.fillStyle = palette.cardText;
-              ctx.fillText(cell.slice(0, 11), cx + 5, cy + cellH / 2);
+              ctx.fillStyle = d.textColor || palette.cardText;
+              const tx =
+                ctx.textAlign === 'center'
+                  ? cx + cellW / 2
+                  : ctx.textAlign === 'right'
+                  ? cx + cellW - 5
+                  : cx + 5;
+              ctx.fillText(cell.slice(0, 11), tx, cy + cellH / 2);
             });
           });
           break;
         }
         case 'image': {
-          ctx.fillStyle = palette.cardBg;
+          ctx.fillStyle = d.backgroundColor || palette.cardBg;
           ctx.fillRect(x0, y0, 96, 54);
+          ctx.strokeStyle = d.borderColor || strokeColor;
           ctx.strokeRect(x0, y0, 96, 54);
-          ctx.font = '10px "Plus Jakarta Sans", sans-serif';
-          ctx.fillStyle = palette.cardText;
+          ctx.font = `${d.fontSize || 10}px "${d.fontFamily || 'Plus Jakarta Sans'}", sans-serif`;
+          ctx.fillStyle = d.textColor || palette.cardText;
           ctx.fillText(d.text || 'Chart Snapshot', x0 + 8, y0 + 28);
           break;
         }
@@ -1695,17 +1911,66 @@ export function TradingChartCanvas({
       // Draw Editable Selection Anchor Handles
       if (isSelected) {
         ctx.setLineDash([]);
-        d.points.forEach((pt) => {
-          const ax = indexToX(pt.index);
-          const ay = priceToY(pt.price);
-          ctx.fillStyle = '#FFFFFF';
-          ctx.strokeStyle = '#2962FF';
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(ax, ay, 4.5, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-        });
+        if ((d.tool === 'long_position' || d.tool === 'short_position') && 'id' in d && d.id) {
+          const pos = resolvePositionData(d);
+          if (pos) {
+            const handles = getPositionHandles(d as ChartDrawing);
+            handles.forEach((h) => {
+              const isHandleActive =
+                (hoveredHandle?.drawingId === d.id && hoveredHandle?.handle === h.handle) ||
+                (dragState?.mode === 'position_handle' &&
+                  dragState.drawingId === d.id &&
+                  dragState.handle === h.handle);
+              const accent =
+                h.handle === 'tp'
+                  ? pos.profitColor
+                  : h.handle === 'sl'
+                  ? pos.lossColor
+                  : pos.entryColor;
+              const radius = isHandleActive ? 7 : 5.5;
+
+              if (isHandleActive) {
+                ctx.fillStyle = hexToRgba(accent, 0.25);
+                ctx.beginPath();
+                ctx.arc(h.x, h.y, 12, 0, Math.PI * 2);
+                ctx.fill();
+              }
+
+              ctx.fillStyle = '#FFFFFF';
+              ctx.strokeStyle = accent;
+              ctx.lineWidth = isHandleActive ? 2.6 : 2;
+              if (h.handle === 'left_time' || h.handle === 'right_time') {
+                ctx.fillRect(h.x - radius + 1, h.y - radius + 1, (radius - 1) * 2, (radius - 1) * 2);
+                ctx.strokeRect(h.x - radius + 1, h.y - radius + 1, (radius - 1) * 2, (radius - 1) * 2);
+              } else {
+                ctx.beginPath();
+                ctx.arc(h.x, h.y, radius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+              }
+            });
+          }
+        } else {
+          d.points.forEach((pt, pIdx) => {
+            const ax = indexToX(pt.index);
+            const ay = priceToY(pt.price);
+            const isHandleActive =
+              ('id' in d &&
+                hoveredHandle?.drawingId === d.id &&
+                hoveredHandle?.handle === pIdx) ||
+              (dragState?.mode === 'anchor' &&
+                'id' in d &&
+                dragState.drawingId === d.id &&
+                dragState.pointIndex === pIdx);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.strokeStyle = '#2962FF';
+            ctx.lineWidth = isHandleActive ? 2.5 : 2;
+            ctx.beginPath();
+            ctx.arc(ax, ay, isHandleActive ? 6.5 : 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+          });
+        }
       }
 
       ctx.restore();
@@ -1713,25 +1978,35 @@ export function TradingChartCanvas({
 
     if (!hideAllDrawings) {
       drawings.forEach((d) => {
-        if (!d.visible) return;
-        renderDrawing(d, d.id === selectedDrawingId, false);
+        if (!isDrawingVisibleOnTimeframe(d, timeframe)) return;
+        renderDrawing(
+          d,
+          d.id === selectedDrawingId,
+          d.id === hoveredDrawingId,
+          false
+        );
       });
     }
 
     // Pending Multi-Point Draft Preview
     if (pendingPoints.length > 0 && hoverPos && activeTool !== 'cursor') {
       const def = getDrawingToolDef(activeTool);
+      const tplCfg = getDefaultConfigForTool(activeTool, templates);
       const hoverPt = getChartPoint(hoverPos.x, hoverPos.y);
       renderDrawing(
         {
           tool: activeTool,
           points: [...pendingPoints, hoverPt],
-          color: def?.defaultColor ?? '#2962FF',
-          lineWidth: 1.5,
-          lineStyle: 'solid',
-          opacity: 0.9,
-          showLabels: true,
+          color: tplCfg.color ?? def?.defaultColor ?? '#2962FF',
+          fillColor: tplCfg.fillColor,
+          fillOpacity: tplCfg.fillOpacity,
+          lineWidth: tplCfg.lineWidth ?? 1.5,
+          lineStyle: tplCfg.lineStyle ?? 'solid',
+          opacity: tplCfg.opacity ?? 0.9,
+          showLabels: tplCfg.showLabels ?? true,
+          fibLevels: tplCfg.fibLevels,
         },
+        false,
         false,
         true
       );
@@ -1739,15 +2014,17 @@ export function TradingChartCanvas({
 
     if (brushPoints && brushPoints.length > 1 && activeTool !== 'cursor') {
       const def = getDrawingToolDef(activeTool);
+      const tplCfg = getDefaultConfigForTool(activeTool, templates);
       renderDrawing(
         {
           tool: activeTool,
           points: brushPoints,
-          color: def?.defaultColor ?? '#F0B90B',
-          lineWidth: 2,
-          lineStyle: 'solid',
-          opacity: 1,
+          color: tplCfg.color ?? def?.defaultColor ?? '#F0B90B',
+          lineWidth: tplCfg.lineWidth ?? 2,
+          lineStyle: tplCfg.lineStyle ?? 'solid',
+          opacity: tplCfg.opacity ?? 1,
         },
+        false,
         false,
         true
       );
@@ -1773,7 +2050,12 @@ export function TradingChartCanvas({
     // Horizontal Drawing Price Tags on Y-Axis
     if (!hideAllDrawings) {
       drawings
-        .filter((d) => d.visible && (d.tool === 'horizontal' || d.tool === 'horizontal_ray') && d.points[0])
+        .filter(
+          (d) =>
+            isDrawingVisibleOnTimeframe(d, timeframe) &&
+            (d.tool === 'horizontal' || d.tool === 'horizontal_ray') &&
+            d.points[0]
+        )
         .forEach((d) => {
           const yTag = priceToY(d.points[0].price);
           if (yTag >= topPad && yTag <= topPad + mainPaneHeight) {
@@ -1982,7 +2264,11 @@ export function TradingChartCanvas({
     compareInstrument,
     compareCandles,
     drawings,
+    templates,
     selectedDrawingId,
+    hoveredDrawingId,
+    hoveredHandle,
+    dragState,
     pendingPoints,
     brushPoints,
     hoverPos,
@@ -2000,36 +2286,79 @@ export function TradingChartCanvas({
     subPaneHeight,
   ]);
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+  const beginInteraction = (x: number, y: number, isTouch = false) => {
     if (x > plotWidth || y > topPad + mainPaneHeight) return;
-
+    const hitRadius = isTouch ? 18 : 11;
     const pt = getChartPoint(x, y);
 
     if (activeTool === 'cursor') {
-      // Check if clicking an anchor handle of selected drawing
+      // 1. Check if clicking an anchor / position handle of selected drawing
       if (selectedDrawingId) {
         const sel = drawings.find((d) => d.id === selectedDrawingId);
-        if (sel && !sel.locked && sel.visible) {
-          for (let i = 0; i < sel.points.length; i++) {
-            const ax = indexToX(sel.points[i].index);
-            const ay = priceToY(sel.points[i].price);
-            if (Math.hypot(x - ax, y - ay) <= 9) {
-              setDragState({ mode: 'anchor', drawingId: sel.id, pointIndex: i });
-              return;
+        if (sel && !sel.locked && isDrawingVisibleOnTimeframe(sel, timeframe)) {
+          if (sel.tool === 'long_position' || sel.tool === 'short_position') {
+            const handles = getPositionHandles(sel);
+            const pos = resolvePositionData(sel);
+            if (pos) {
+              for (const h of handles) {
+                if (Math.hypot(x - h.x, y - h.y) <= hitRadius) {
+                  setDragState({
+                    mode: 'position_handle',
+                    drawingId: sel.id,
+                    handle: h.handle as PositionHandleKind,
+                    origPos: { ...pos },
+                    startPt: pt,
+                  });
+                  return;
+                }
+              }
+            }
+          } else {
+            for (let i = 0; i < sel.points.length; i++) {
+              const ax = indexToX(sel.points[i].index);
+              const ay = priceToY(sel.points[i].price);
+              if (Math.hypot(x - ax, y - ay) <= hitRadius) {
+                setDragState({ mode: 'anchor', drawingId: sel.id, pointIndex: i });
+                return;
+              }
             }
           }
         }
       }
 
-      // Check if clicking a drawing body
+      // 2. Check if clicking a drawing body
       const hitId = hitTestDrawing(x, y);
       if (hitId) {
         onSelectDrawing(hitId);
         const hitObj = drawings.find((d) => d.id === hitId);
         if (hitObj && !hitObj.locked) {
+          if (hitObj.tool === 'long_position' || hitObj.tool === 'short_position') {
+            const pos = resolvePositionData(hitObj);
+            if (pos) {
+              // Check if user directly clicked a handle on first tap
+              const handles = getPositionHandles(hitObj);
+              for (const h of handles) {
+                if (Math.hypot(x - h.x, y - h.y) <= hitRadius) {
+                  setDragState({
+                    mode: 'position_handle',
+                    drawingId: hitId,
+                    handle: h.handle as PositionHandleKind,
+                    origPos: { ...pos },
+                    startPt: pt,
+                  });
+                  return;
+                }
+              }
+              setDragState({
+                mode: 'body',
+                drawingId: hitId,
+                startPt: pt,
+                origPoints: hitObj.points.map((p) => ({ ...p })),
+                origPos: { ...pos },
+              });
+              return;
+            }
+          }
           setDragState({
             mode: 'body',
             drawingId: hitId,
@@ -2048,8 +2377,9 @@ export function TradingChartCanvas({
 
     const def = getDrawingToolDef(activeTool);
     if (!def) return;
+    const tplCfg = getDefaultConfigForTool(activeTool, templates);
 
-    // Text / Note / Comment / Callout prompt on single point
+    // Text / Note / Comment / Signpost / Image prompt on single point
     if (
       activeTool === 'text' ||
       activeTool === 'note' ||
@@ -2072,13 +2402,30 @@ export function TradingChartCanvas({
         tool: activeTool,
         category: def.category,
         points: [pt],
-        color: def.defaultColor,
-        lineWidth: 1.5,
-        lineStyle: 'solid',
-        opacity: 1,
+        color: tplCfg.color ?? def.defaultColor,
+        fillColor: tplCfg.fillColor,
+        fillOpacity: tplCfg.fillOpacity,
+        textColor: tplCfg.textColor,
+        lineWidth: tplCfg.lineWidth ?? 1.5,
+        lineStyle: tplCfg.lineStyle ?? 'solid',
+        opacity: tplCfg.opacity ?? 1,
+        fontFamily: tplCfg.fontFamily,
+        fontSize: tplCfg.fontSize,
+        textAlign: tplCfg.textAlign,
+        backgroundColor: tplCfg.backgroundColor,
+        borderColor: tplCfg.borderColor,
+        extendLeft: tplCfg.extendLeft,
+        extendRight: tplCfg.extendRight,
         visible: true,
+        visibleIntervals: tplCfg.visibleIntervals,
         locked: false,
-        tableRows: activeTool === 'table' ? [['Zone', 'Value'], ['Spot', formatPrice(pt.price, instrument.decimals)]] : undefined,
+        tableRows:
+          activeTool === 'table'
+            ? [
+                ['Zone', 'Value'],
+                ['Spot', formatPrice(pt.price, instrument.decimals)],
+              ]
+            : undefined,
       });
       return;
     }
@@ -2103,19 +2450,76 @@ export function TradingChartCanvas({
         setPendingPoints(nextPts);
         return;
       }
+
+      if (activeTool === 'long_position' || activeTool === 'short_position') {
+        const isLong = activeTool === 'long_position';
+        const pStart = nextPts[0];
+        const pEnd = nextPts[1];
+        const meta = getInstrumentTickMeta(instrument);
+        const minSpan = Math.max(meta.pipSize * 8, (maxPrice - minPrice) * 0.1);
+        const entryPrice = pStart.price;
+        const takeProfit = isLong
+          ? Math.max(pEnd.price, entryPrice + minSpan)
+          : Math.max(0.0001, Math.min(pEnd.price, entryPrice - minSpan));
+        const stopLoss = isLong
+          ? Math.max(0.0001, entryPrice - Math.abs(takeProfit - entryPrice) * 0.5)
+          : entryPrice + Math.abs(entryPrice - takeProfit) * 0.5;
+        const startIdx = Math.min(pStart.index, pEnd.index);
+        const endIdx = Math.min(totalBars - 1, Math.max(startIdx + 12, Math.max(pStart.index, pEnd.index)));
+
+        onAddDrawing({
+          symbol: instrument.symbol,
+          tool: activeTool,
+          category: def.category,
+          points: [
+            { index: startIdx, price: entryPrice },
+            { index: endIdx, price: takeProfit },
+          ],
+          color: tplCfg.color ?? def.defaultColor,
+          lineWidth: tplCfg.lineWidth ?? 1.5,
+          lineStyle: tplCfg.lineStyle ?? 'solid',
+          opacity: tplCfg.opacity ?? 0.9,
+          visible: true,
+          visibleIntervals: tplCfg.visibleIntervals,
+          locked: false,
+          positionData: {
+            entryPrice,
+            takeProfit,
+            stopLoss,
+            startIndex: startIdx,
+            endIndex: endIdx,
+            positionSize: tplCfg.positionStyle?.positionSize ?? meta.defaultPositionSize,
+            profitColor: tplCfg.positionStyle?.profitColor ?? '#089981',
+            lossColor: tplCfg.positionStyle?.lossColor ?? '#F23645',
+            entryColor: tplCfg.positionStyle?.entryColor ?? '#2962FF',
+          },
+        });
+        setPendingPoints([]);
+        return;
+      }
+
       onAddDrawing({
         symbol: instrument.symbol,
         tool: activeTool,
         category: def.category,
         points: nextPts,
-        color: def.defaultColor,
-        lineWidth: 1.5,
-        lineStyle: 'solid',
-        opacity: 1,
+        color: tplCfg.color ?? def.defaultColor,
+        fillColor: tplCfg.fillColor ?? def.defaultColor,
+        fillOpacity: tplCfg.fillOpacity,
+        textColor: tplCfg.textColor,
+        lineWidth: tplCfg.lineWidth ?? 1.5,
+        lineStyle: tplCfg.lineStyle ?? 'solid',
+        opacity: tplCfg.opacity ?? 1,
+        extendLeft: tplCfg.extendLeft,
+        extendRight: tplCfg.extendRight,
         visible: true,
+        visibleIntervals: tplCfg.visibleIntervals,
         locked: false,
-        showLabels: true,
-        fibLevels: def.category === 'fibonacci' ? DEFAULT_FIB_LEVELS.map((l) => ({ ...l })) : undefined,
+        showLabels: tplCfg.showLabels ?? true,
+        fibLevels:
+          def.category === 'fibonacci'
+            ? (tplCfg.fibLevels ?? DEFAULT_FIB_LEVELS).map((l) => ({ ...l }))
+            : undefined,
       });
       setPendingPoints([]);
     } else {
@@ -2123,18 +2527,35 @@ export function TradingChartCanvas({
     }
   };
 
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    beginInteraction(e.clientX - rect.left, e.clientY - rect.top, false);
+  };
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length !== 1) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.touches[0].clientX - rect.left;
+    const y = e.touches[0].clientY - rect.top;
+    setHoverPos({ x, y });
+    beginInteraction(x, y, true);
+  };
+
   const handleDoubleClick = () => {
     if ((activeTool === 'path' || activeTool === 'polyline') && pendingPoints.length >= 2) {
       const def = getDrawingToolDef(activeTool);
+      const tplCfg = getDefaultConfigForTool(activeTool, templates);
       onAddDrawing({
         symbol: instrument.symbol,
         tool: activeTool,
         category: def?.category ?? 'shapes',
         points: pendingPoints,
-        color: def?.defaultColor ?? '#2962FF',
-        lineWidth: 2,
-        lineStyle: 'solid',
-        opacity: 1,
+        color: tplCfg.color ?? def?.defaultColor ?? '#2962FF',
+        fillColor: tplCfg.fillColor,
+        fillOpacity: tplCfg.fillOpacity,
+        lineWidth: tplCfg.lineWidth ?? 2,
+        lineStyle: tplCfg.lineStyle ?? 'solid',
+        opacity: tplCfg.opacity ?? 1,
         visible: true,
         locked: false,
       });
@@ -2142,16 +2563,141 @@ export function TradingChartCanvas({
     }
   };
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+  const handlePointerMove = (x: number, y: number) => {
     setHoverPos({ x, y });
 
     if (dragState) {
       const pt = getChartPoint(x, y);
       const target = drawings.find((d) => d.id === dragState.drawingId);
       if (!target) return;
+
+      if (dragState.mode === 'position_handle') {
+        const isLong = target.tool === 'long_position';
+        const orig = dragState.origPos;
+        const minStep = Math.pow(10, -instrument.decimals);
+
+        if (dragState.handle === 'tp') {
+          // Independent Take Profit adjustment — Entry & SL untouched!
+          const nextTp = isLong
+            ? Math.max(orig.entryPrice + minStep, pt.price)
+            : Math.max(0.0001, Math.min(orig.entryPrice - minStep, pt.price));
+          const updated: PositionDrawingData = { ...orig, takeProfit: nextTp };
+          onUpdateDrawing(
+            target.id,
+            {
+              positionData: updated,
+              points: [
+                { index: updated.startIndex, price: updated.entryPrice },
+                { index: updated.endIndex, price: updated.takeProfit },
+              ],
+            },
+            false
+          );
+          setHoveredHandle({
+            drawingId: target.id,
+            handle: 'tp',
+            x,
+            y: priceToY(nextTp),
+            label: 'Take Profit',
+          });
+        } else if (dragState.handle === 'sl') {
+          // Independent Stop Loss adjustment — Entry & TP untouched!
+          const nextSl = isLong
+            ? Math.max(0.0001, Math.min(orig.entryPrice - minStep, pt.price))
+            : Math.max(orig.entryPrice + minStep, pt.price);
+          const updated: PositionDrawingData = { ...orig, stopLoss: nextSl };
+          onUpdateDrawing(
+            target.id,
+            {
+              positionData: updated,
+              points: [
+                { index: updated.startIndex, price: updated.entryPrice },
+                { index: updated.endIndex, price: updated.takeProfit },
+              ],
+            },
+            false
+          );
+          setHoveredHandle({
+            drawingId: target.id,
+            handle: 'sl',
+            x,
+            y: priceToY(nextSl),
+            label: 'Stop Loss',
+          });
+        } else if (dragState.handle === 'entry') {
+          // Moving Entry preserves exact relative distances to TP & SL!
+          const dPrice = pt.price - dragState.startPt.price;
+          const nextEntry = Math.max(0.0001, orig.entryPrice + dPrice);
+          const actualDelta = nextEntry - orig.entryPrice;
+          const updated: PositionDrawingData = {
+            ...orig,
+            entryPrice: nextEntry,
+            takeProfit: Math.max(0.0001, orig.takeProfit + actualDelta),
+            stopLoss: Math.max(0.0001, orig.stopLoss + actualDelta),
+          };
+          onUpdateDrawing(
+            target.id,
+            {
+              positionData: updated,
+              points: [
+                { index: updated.startIndex, price: updated.entryPrice },
+                { index: updated.endIndex, price: updated.takeProfit },
+              ],
+            },
+            false
+          );
+          setHoveredHandle({
+            drawingId: target.id,
+            handle: 'entry',
+            x,
+            y: priceToY(nextEntry),
+            label: 'Entry Price',
+          });
+        } else if (dragState.handle === 'left_time') {
+          const nextStart = Math.max(0, Math.min(orig.endIndex - 2, pt.index));
+          const updated: PositionDrawingData = { ...orig, startIndex: nextStart };
+          onUpdateDrawing(
+            target.id,
+            {
+              positionData: updated,
+              points: [
+                { index: updated.startIndex, price: updated.entryPrice },
+                { index: updated.endIndex, price: updated.takeProfit },
+              ],
+            },
+            false
+          );
+          setHoveredHandle({
+            drawingId: target.id,
+            handle: 'left_time',
+            x: indexToX(nextStart),
+            y: priceToY(orig.entryPrice),
+            label: 'Start Time',
+          });
+        } else if (dragState.handle === 'right_time') {
+          const nextEnd = Math.min(totalBars - 1, Math.max(orig.startIndex + 2, pt.index));
+          const updated: PositionDrawingData = { ...orig, endIndex: nextEnd };
+          onUpdateDrawing(
+            target.id,
+            {
+              positionData: updated,
+              points: [
+                { index: updated.startIndex, price: updated.entryPrice },
+                { index: updated.endIndex, price: updated.takeProfit },
+              ],
+            },
+            false
+          );
+          setHoveredHandle({
+            drawingId: target.id,
+            handle: 'right_time',
+            x: indexToX(nextEnd),
+            y: priceToY(orig.entryPrice),
+            label: 'End Time',
+          });
+        }
+        return;
+      }
 
       if (dragState.mode === 'anchor') {
         const nextPts = target.points.map((p, idx) =>
@@ -2161,6 +2707,33 @@ export function TradingChartCanvas({
       } else if (dragState.mode === 'body') {
         const dIndex = pt.index - dragState.startPt.index;
         const dPrice = pt.price - dragState.startPt.price;
+        if (dragState.origPos) {
+          const orig = dragState.origPos;
+          const span = orig.endIndex - orig.startIndex;
+          const nextStart = Math.max(0, Math.min(totalBars - 1 - span, orig.startIndex + dIndex));
+          const nextEntry = Math.max(0.0001, orig.entryPrice + dPrice);
+          const actualDelta = nextEntry - orig.entryPrice;
+          const updated: PositionDrawingData = {
+            ...orig,
+            startIndex: nextStart,
+            endIndex: nextStart + span,
+            entryPrice: nextEntry,
+            takeProfit: Math.max(0.0001, orig.takeProfit + actualDelta),
+            stopLoss: Math.max(0.0001, orig.stopLoss + actualDelta),
+          };
+          onUpdateDrawing(
+            target.id,
+            {
+              positionData: updated,
+              points: [
+                { index: updated.startIndex, price: updated.entryPrice },
+                { index: updated.endIndex, price: updated.takeProfit },
+              ],
+            },
+            false
+          );
+          return;
+        }
         const nextPts = dragState.origPoints.map((op) => ({
           index: Math.max(0, Math.min(totalBars - 1, op.index + dIndex)),
           price: Math.max(0.0001, op.price + dPrice),
@@ -2176,30 +2749,95 @@ export function TradingChartCanvas({
       const deltaBars = Math.round(dx * barsPerPx);
       const maxOffset = Math.max(0, totalBars - visibleCount);
       setRightOffset(Math.max(0, Math.min(maxOffset, panStartRef.current.startOffset + deltaBars)));
-    } else if (brushPoints && (activeTool === 'brush' || activeTool === 'highlighter')) {
-      setBrushPoints((prev) => (prev ? [...prev, getChartPoint(x, y)] : null));
+      return;
     }
+
+    if (brushPoints && (activeTool === 'brush' || activeTool === 'highlighter')) {
+      setBrushPoints((prev) => (prev ? [...prev, getChartPoint(x, y)] : null));
+      return;
+    }
+
+    // Hover Detection for Handles & Position Measurement Tooltip
+    if (activeTool === 'cursor') {
+      let foundHandle: HoveredHandleInfo | null = null;
+      if (selectedDrawingId) {
+        const sel = drawings.find((d) => d.id === selectedDrawingId);
+        if (sel && isDrawingVisibleOnTimeframe(sel, timeframe)) {
+          if (sel.tool === 'long_position' || sel.tool === 'short_position') {
+            const handles = getPositionHandles(sel);
+            for (const h of handles) {
+              if (Math.hypot(x - h.x, y - h.y) <= 11) {
+                foundHandle = h;
+                break;
+              }
+            }
+          } else {
+            for (let i = 0; i < sel.points.length; i++) {
+              const ax = indexToX(sel.points[i].index);
+              const ay = priceToY(sel.points[i].price);
+              if (Math.hypot(x - ax, y - ay) <= 11) {
+                foundHandle = {
+                  drawingId: sel.id,
+                  handle: i,
+                  x: ax,
+                  y: ay,
+                  label: `Anchor #${i + 1}`,
+                };
+                break;
+              }
+            }
+          }
+        }
+      }
+      setHoveredHandle(foundHandle);
+      const hitId = hitTestDrawing(x, y);
+      setHoveredDrawingId(hitId);
+    } else {
+      setHoveredHandle(null);
+      setHoveredDrawingId(null);
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    handlePointerMove(e.clientX - rect.left, e.clientY - rect.top);
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length !== 1) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    handlePointerMove(e.touches[0].clientX - rect.left, e.touches[0].clientY - rect.top);
   };
 
   const handleMouseUp = () => {
     if (dragState) {
       const target = drawings.find((d) => d.id === dragState.drawingId);
-      if (target) onUpdateDrawing(target.id, { points: target.points }, true);
+      if (target) {
+        onUpdateDrawing(
+          target.id,
+          {
+            points: target.points,
+            ...(target.positionData ? { positionData: target.positionData } : {}),
+          },
+          true
+        );
+      }
       setDragState(null);
     }
     setIsPanning(false);
     panStartRef.current = null;
     if (brushPoints && brushPoints.length > 1 && activeTool !== 'cursor') {
       const def = getDrawingToolDef(activeTool);
+      const tplCfg = getDefaultConfigForTool(activeTool, templates);
       onAddDrawing({
         symbol: instrument.symbol,
         tool: activeTool,
         category: def?.category ?? 'shapes',
         points: brushPoints,
-        color: def?.defaultColor ?? '#F0B90B',
-        lineWidth: activeTool === 'highlighter' ? 3 : 2,
-        lineStyle: 'solid',
-        opacity: 1,
+        color: tplCfg.color ?? def?.defaultColor ?? '#F0B90B',
+        lineWidth: tplCfg.lineWidth ?? (activeTool === 'highlighter' ? 3 : 2),
+        lineStyle: tplCfg.lineStyle ?? 'solid',
+        opacity: tplCfg.opacity ?? 1,
         visible: true,
         locked: false,
       });
@@ -2220,6 +2858,31 @@ export function TradingChartCanvas({
 
   const isUpBar = activeCandle ? activeCandle.close >= activeCandle.open : true;
   const activeToolDef = getDrawingToolDef(activeTool);
+
+  // Compute active Position Hover Tooltip data (when cursor hovers or drags a Long/Short position)
+  const inspectedPositionId =
+    dragState?.mode === 'position_handle' || dragState?.mode === 'body'
+      ? dragState.drawingId
+      : hoveredDrawingId;
+  const inspectedPositionDrawing = inspectedPositionId
+    ? drawings.find(
+        (d) =>
+          d.id === inspectedPositionId &&
+          isDrawingVisibleOnTimeframe(d, timeframe) &&
+          (d.tool === 'long_position' || d.tool === 'short_position')
+      ) ?? null
+    : null;
+  const inspectedPositionData = inspectedPositionDrawing
+    ? resolvePositionData(inspectedPositionDrawing)
+    : null;
+  const inspectedPositionMetrics =
+    inspectedPositionDrawing && inspectedPositionData
+      ? computePositionMetrics(
+          inspectedPositionDrawing.tool === 'long_position',
+          inspectedPositionData,
+          instrument
+        )
+      : null;
 
   return (
     <div ref={containerRef} className="relative w-full h-full overflow-hidden select-none">
@@ -2263,12 +2926,99 @@ export function TradingChartCanvas({
         </div>
       )}
 
+      {/* Handle Identifier Tooltip (Take Profit / Stop Loss / Entry Price / Time Boundary) */}
+      {hoveredHandle && (
+        <div
+          style={{
+            left: Math.max(8, Math.min(size.width - 130, hoveredHandle.x + 12)),
+            top: Math.max(8, Math.min(size.height - 40, hoveredHandle.y - 26)),
+          }}
+          className="pointer-events-none absolute z-30 px-2 py-0.5 rounded bg-[var(--bg-surface)] border border-[var(--border-strong)] text-[11px] font-medium text-[var(--text-primary)] shadow-md whitespace-nowrap"
+        >
+          {hoveredHandle.label}
+        </div>
+      )}
+
+      {/* Long / Short Position Hover Measurement Tooltip (Risk/Reward, Pips, Points) */}
+      {inspectedPositionDrawing &&
+        inspectedPositionData &&
+        inspectedPositionMetrics &&
+        hoverPos && (
+          <div
+            style={{
+              left: Math.max(
+                8,
+                Math.min(
+                  size.width - 236,
+                  hoverPos.x > size.width * 0.65 ? hoverPos.x - 232 : hoverPos.x + 16
+                )
+              ),
+              top: Math.max(40, Math.min(size.height - 175, hoverPos.y + 12)),
+            }}
+            className="pointer-events-none absolute z-20 w-56 p-2.5 rounded-md bg-[var(--bg-surface)]/96 backdrop-blur-[2px] border border-[var(--border-strong)] shadow-xl text-[11px]"
+          >
+            <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-[var(--border-subtle)]">
+              <span
+                className={`font-semibold tracking-wide ${
+                  inspectedPositionMetrics.isLong ? 'text-[#089981]' : 'text-[#F23645]'
+                }`}
+              >
+                {inspectedPositionMetrics.isLong ? 'LONG POSITION' : 'SHORT POSITION'}
+              </span>
+              <span className="font-mono tabular-nums font-bold text-[var(--text-primary)]">
+                1:{inspectedPositionMetrics.rrRatio.toFixed(2)}
+              </span>
+            </div>
+
+            <div className="space-y-1 font-mono tabular-nums">
+              <div className="flex justify-between">
+                <span className="font-sans text-[var(--text-secondary)]">Entry</span>
+                <span className="text-[var(--text-primary)]">
+                  {formatPrice(inspectedPositionData.entryPrice, instrument.decimals)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="font-sans text-[var(--text-secondary)]">Take Profit</span>
+                <span className="text-[#089981]">
+                  {formatPrice(inspectedPositionData.takeProfit, instrument.decimals)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="font-sans text-[var(--text-secondary)]">Stop Loss</span>
+                <span className="text-[#F23645]">
+                  {formatPrice(inspectedPositionData.stopLoss, instrument.decimals)}
+                </span>
+              </div>
+            </div>
+
+            <div className="mt-1.5 pt-1.5 border-t border-[var(--border-subtle)] space-y-1 font-mono tabular-nums">
+              <div className="flex justify-between text-[#089981]">
+                <span className="font-sans">Reward</span>
+                <span>
+                  {formatMetricNumber(inspectedPositionMetrics.rewardPips)}{' '}
+                  {inspectedPositionMetrics.pipLabel} ·{' '}
+                  {formatMetricNumber(inspectedPositionMetrics.rewardPoints)} pts
+                </span>
+              </div>
+              <div className="flex justify-between text-[#F23645]">
+                <span className="font-sans">Risk</span>
+                <span>
+                  {formatMetricNumber(inspectedPositionMetrics.riskPips)}{' '}
+                  {inspectedPositionMetrics.pipLabel} ·{' '}
+                  {formatMetricNumber(inspectedPositionMetrics.riskPoints)} pts
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
       {/* Inline Text / Note / Callout Draft */}
       {textDraft && (
         <form
           onSubmit={(e) => {
             e.preventDefault();
             const def = getDrawingToolDef(textDraft.tool);
+            const tplCfg = getDefaultConfigForTool(textDraft.tool, templates);
             const pts =
               pendingPoints.length >= 2
                 ? pendingPoints
@@ -2279,11 +3029,18 @@ export function TradingChartCanvas({
               category: def?.category ?? 'annotations',
               points: pts,
               text: textDraft.value.trim() || def?.name || 'Annotation',
-              color: def?.defaultColor ?? '#2962FF',
-              lineWidth: 1.5,
-              lineStyle: 'solid',
-              opacity: 1,
+              color: tplCfg.color ?? def?.defaultColor ?? '#2962FF',
+              textColor: tplCfg.textColor,
+              fontFamily: tplCfg.fontFamily,
+              fontSize: tplCfg.fontSize,
+              textAlign: tplCfg.textAlign,
+              backgroundColor: tplCfg.backgroundColor,
+              borderColor: tplCfg.borderColor,
+              lineWidth: tplCfg.lineWidth ?? 1.5,
+              lineStyle: tplCfg.lineStyle ?? 'solid',
+              opacity: tplCfg.opacity ?? 1,
               visible: true,
+              visibleIntervals: tplCfg.visibleIntervals,
               locked: false,
             });
             setTextDraft(null);
@@ -2314,17 +3071,26 @@ export function TradingChartCanvas({
         onDoubleClick={handleDoubleClick}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleMouseUp}
         onMouseLeave={() => {
           setHoverPos(null);
+          setHoveredDrawingId(null);
+          setHoveredHandle(null);
           handleMouseUp();
         }}
         onWheel={handleWheel}
-        className={`block w-full h-full ${
+        className={`block w-full h-full touch-none ${
           dragState
             ? 'cursor-move'
+            : hoveredHandle
+            ? 'cursor-grab'
             : activeTool === 'cursor'
             ? isPanning
               ? 'cursor-grabbing'
+              : hoveredDrawingId
+              ? 'cursor-pointer'
               : crosshairEnabled
               ? 'cursor-crosshair'
               : 'cursor-default'

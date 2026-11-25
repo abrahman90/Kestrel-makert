@@ -13,7 +13,7 @@ export type NavSection =
   | 'portfolio'
   | 'settings';
 
-export type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1D' | '1W';
+export type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1D' | '1W' | '1M';
 
 export type ChartStyle = 'candles' | 'hollow' | 'line' | 'area' | 'heikin_ashi';
 
@@ -109,11 +109,24 @@ export type DrawingTool =
   | 'image';
 
 export type LineStyle = 'solid' | 'dashed' | 'dotted';
+export type TextAlign = 'left' | 'center' | 'right';
 
 export interface FibLevelConfig {
   ratio: number;
   enabled: boolean;
   color: string;
+}
+
+export interface PositionDrawingData {
+  entryPrice: number;
+  takeProfit: number;
+  stopLoss: number;
+  startIndex: number;
+  endIndex: number;
+  positionSize: number;
+  profitColor: string;
+  lossColor: string;
+  entryColor: string;
 }
 
 export interface ChartDrawing {
@@ -125,17 +138,65 @@ export interface ChartDrawing {
   groupName: string;
   points: { index: number; price: number }[];
   color: string;
+  fillColor?: string;
+  fillOpacity?: number;
+  textColor?: string;
   lineWidth: number;
   lineStyle: LineStyle;
   opacity: number; // 0.1 - 1
+  fontFamily?: string;
+  fontSize?: number;
+  textAlign?: TextAlign;
+  backgroundColor?: string;
+  borderColor?: string;
   extendLeft?: boolean;
   extendRight?: boolean;
   visible: boolean;
+  visibleIntervals?: Timeframe[];
   locked: boolean;
   text?: string;
   showLabels?: boolean;
   fibLevels?: FibLevelConfig[];
   tableRows?: string[][];
+  positionData?: PositionDrawingData;
+}
+
+export interface DrawingTemplateConfig {
+  color: string;
+  fillColor?: string;
+  fillOpacity?: number;
+  textColor?: string;
+  lineWidth: number;
+  lineStyle: LineStyle;
+  opacity: number;
+  fontFamily?: string;
+  fontSize?: number;
+  textAlign?: TextAlign;
+  backgroundColor?: string;
+  borderColor?: string;
+  extendLeft?: boolean;
+  extendRight?: boolean;
+  showLabels?: boolean;
+  fibLevels?: FibLevelConfig[];
+  visibleIntervals?: Timeframe[];
+  positionStyle?: {
+    profitColor: string;
+    lossColor: string;
+    entryColor: string;
+    positionSize?: number;
+  };
+}
+
+export interface DrawingTemplate {
+  id: string;
+  name: string;
+  tool: Exclude<DrawingTool, 'cursor'>;
+  category: DrawingCategoryId;
+  isSystemDefault?: boolean;
+  isDefaultForTool?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  config: DrawingTemplateConfig;
 }
 
 export interface Candle {

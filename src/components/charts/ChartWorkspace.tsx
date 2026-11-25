@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   BellPlus,
+  Bookmark,
   CandlestickChart,
   ChevronLeft,
   ChevronRight,
@@ -22,6 +23,10 @@ import {
 } from 'lucide-react';
 import { usePlatform } from '../../context/PlatformContext';
 import {
+  applyTemplateConfigToDrawing,
+  DEFAULT_DRAWING_TEMPLATES,
+} from '../../data/drawingTemplatesCatalog';
+import {
   DEFAULT_FIB_LEVELS,
   getDrawingToolDef,
 } from '../../data/drawingToolsCatalog';
@@ -31,18 +36,84 @@ import {
   ChartDrawing,
   ChartStyle,
   DrawingCategoryId,
+  DrawingTemplate,
+  DrawingTemplateConfig,
   DrawingTool,
   IndicatorConfig,
   Timeframe,
 } from '../../types/market';
 import { formatPrice } from '../../utils/indicators';
 import { Button, Modal, PriceChangeText, Select, SignalLabel } from '../ui/DesignSystem';
-import { DrawingContextualToolbar } from './DrawingContextualToolbar';
+import {
+  DrawingContextualToolbar,
+  SelectionBounds,
+  VisualOrderAction,
+} from './DrawingContextualToolbar';
 import { DrawingObjectManager } from './DrawingObjectManager';
+import { DrawingTemplateManager } from './DrawingTemplateManager';
 import { DrawingToolbar } from './DrawingToolbar';
 import { ChartVisualSettings, NavCommand, TradingChartCanvas } from './TradingChartCanvas';
 
-const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W'];
+const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M'];
+const TEMPLATES_STORAGE_KEY = 'kestrel_drawing_templates_v1';
+
+function loadInitialTemplates(): DrawingTemplate[] {
+  try {
+    const raw = window.localStorage.getItem(TEMPLATES_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed as DrawingTemplate[];
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return DEFAULT_DRAWING_TEMPLATES;
+}
+
+function deepCloneDrawing(
+  orig: ChartDrawing,
+  options?: {
+    targetSymbol?: string;
+    indexShift?: number;
+    priceScale?: number;
+    nameSuffix?: string;
+  }
+): ChartDrawing {
+  const indexShift = options?.indexShift ?? 3;
+  const priceScale = options?.priceScale ?? 1;
+  const basePrice = orig.points[0]?.price || orig.positionData?.entryPrice || 1;
+  const mapPrice = (p: number) =>
+    options?.targetSymbol && options.targetSymbol !== orig.symbol
+      ? basePrice * priceScale + (p - basePrice) * priceScale
+      : p * priceScale;
+
+  return {
+    ...orig,
+    id: `dr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    symbol: options?.targetSymbol ?? orig.symbol,
+    name: options?.nameSuffix ? `${orig.name} ${options.nameSuffix}` : orig.name,
+    locked: false,
+    points: orig.points.map((p) => ({
+      index: Math.max(0, Math.min(179, p.index + indexShift)),
+      price: mapPrice(p.price),
+    })),
+    fibLevels: orig.fibLevels ? orig.fibLevels.map((l) => ({ ...l })) : undefined,
+    visibleIntervals: orig.visibleIntervals ? [...orig.visibleIntervals] : undefined,
+    tableRows: orig.tableRows ? orig.tableRows.map((row) => [...row]) : undefined,
+    positionData: orig.positionData
+      ? {
+          ...orig.positionData,
+          entryPrice: mapPrice(orig.positionData.entryPrice),
+          takeProfit: mapPrice(orig.positionData.takeProfit),
+          stopLoss: mapPrice(orig.positionData.stopLoss),
+          startIndex: Math.max(0, Math.min(175, orig.positionData.startIndex + indexShift)),
+          endIndex: Math.max(2, Math.min(179, orig.positionData.endIndex + indexShift)),
+        }
+      : undefined,
+  };
+}
 
 const INITIAL_INDICATORS: IndicatorConfig[] = [
   { id: 'volume', label: 'Volume Histogram', shortName: 'Vol', category: 'Overlay', enabled: true, color: '#089981', params: {} },
@@ -118,6 +189,7 @@ export function ChartWorkspace() {
     openCreateAlertModal,
     setIsSearchModalOpen,
     openTechnicalAnalysis,
+    pushToast,
   } = usePlatform();
 
   const workspaceRef = useRef<HTMLDivElement>(null);
@@ -143,7 +215,13 @@ export function ChartWorkspace() {
   });
   const drawings = historyState.stack[historyState.idx] ?? [];
 
+  const [templates, setTemplates] = useState<DrawingTemplate[]>(loadInitialTemplates);
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
+
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const [selectionBounds, setSelectionBounds] = useState<SelectionBounds | null>(null);
+  const [clipboardDrawing, setClipboardDrawing] = useState<ChartDrawing | null>(null);
+
   const [stayInDrawingMode, setStayInDrawingMode] = useState(false);
   const [magnetMode, setMagnetMode] = useState(false);
   const [hideAllDrawings, setHideAllDrawings] = useState(false);
@@ -159,6 +237,7 @@ export function ChartWorkspace() {
   const [indicatorsModalOpen, setIndicatorsModalOpen] = useState(false);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [confirmRemoveAllOpen, setConfirmRemoveAllOpen] = useState(false);
   const [hoveredCandle, setHoveredCandle] = useState<Candle | null>(null);
   const [navCommand, setNavCommand] = useState<NavCommand | null>(null);
 
@@ -168,6 +247,20 @@ export function ChartWorkspace() {
     showVolume: true,
     logScale: false,
   });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TEMPLATES_STORAGE_KEY, JSON.stringify(templates));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [templates]);
+
+  useEffect(() => {
+    if (!selectedDrawingId) {
+      setSelectionBounds(null);
+    }
+  }, [selectedDrawingId]);
 
   const commitDrawings = useCallback(
     (updater: (prev: ChartDrawing[]) => ChartDrawing[], recordHistory = true) => {
@@ -274,24 +367,90 @@ export function ChartWorkspace() {
     [commitDrawings]
   );
 
-  const handleDuplicateDrawing = useCallback(
+  const handleCloneDrawing = useCallback(
     (id: string) => {
       const orig = drawings.find((d) => d.id === id);
       if (!orig) return;
-      const dup: ChartDrawing = {
-        ...orig,
-        id: `dr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        name: `${orig.name} Copy`,
-        locked: false,
-        points: orig.points.map((p) => ({
-          index: Math.min(179, p.index + 3),
-          price: p.price * 0.998,
-        })),
-      };
-      commitDrawings((prev) => [...prev, dup], true);
-      setSelectedDrawingId(dup.id);
+      const cloned = deepCloneDrawing(orig, {
+        indexShift: 3,
+        priceScale: 0.998,
+        nameSuffix: 'Clone',
+      });
+      commitDrawings((prev) => [...prev, cloned], true);
+      setSelectedDrawingId(cloned.id);
+      pushToast({
+        title: 'Drawing cloned',
+        description: cloned.name,
+        variant: 'info',
+      });
     },
-    [drawings, commitDrawings]
+    [drawings, commitDrawings, pushToast]
+  );
+
+  const handleCopyDrawing = useCallback(
+    (id: string) => {
+      const orig = drawings.find((d) => d.id === id);
+      if (!orig) return;
+      setClipboardDrawing(deepCloneDrawing(orig, { indexShift: 0, priceScale: 1 }));
+      pushToast({
+        title: 'Drawing copied',
+        description: `${orig.name} copied to clipboard`,
+        variant: 'info',
+      });
+    },
+    [drawings, pushToast]
+  );
+
+  const handlePasteDrawing = useCallback(() => {
+    if (!clipboardDrawing) return;
+    const sameSymbol = clipboardDrawing.symbol === instrument.symbol;
+    const sourceAnchor =
+      clipboardDrawing.points[0]?.price ||
+      clipboardDrawing.positionData?.entryPrice ||
+      instrument.price;
+    const priceScale = sameSymbol
+      ? 0.997
+      : instrument.price / Math.max(1e-6, sourceAnchor);
+
+    const pasted = deepCloneDrawing(clipboardDrawing, {
+      targetSymbol: instrument.symbol,
+      indexShift: sameSymbol ? 4 : 0,
+      priceScale,
+      nameSuffix: 'Copy',
+    });
+    commitDrawings((prev) => [...prev, pasted], true);
+    setSelectedDrawingId(pasted.id);
+    pushToast({
+      title: 'Drawing pasted',
+      description: `${pasted.name} added to ${instrument.symbol}`,
+      variant: 'success',
+    });
+  }, [clipboardDrawing, instrument.symbol, instrument.price, commitDrawings, pushToast]);
+
+  const handleVisualOrder = useCallback(
+    (id: string, action: VisualOrderAction) => {
+      commitDrawings((prev) => {
+        const symbolItems = prev.filter((d) => d.symbol === instrument.symbol);
+        const otherItems = prev.filter((d) => d.symbol !== instrument.symbol);
+        const idx = symbolItems.findIndex((d) => d.id === id);
+        if (idx === -1) return prev;
+
+        const nextSymbol = [...symbolItems];
+        const [item] = nextSymbol.splice(idx, 1);
+
+        if (action === 'front') {
+          nextSymbol.push(item);
+        } else if (action === 'back') {
+          nextSymbol.unshift(item);
+        } else if (action === 'forward') {
+          nextSymbol.splice(Math.min(nextSymbol.length, idx + 1), 0, item);
+        } else if (action === 'backward') {
+          nextSymbol.splice(Math.max(0, idx - 1), 0, item);
+        }
+        return [...otherItems, ...nextSymbol];
+      }, true);
+    },
+    [commitDrawings, instrument.symbol]
   );
 
   const handleDeleteDrawing = useCallback(
@@ -305,7 +464,13 @@ export function ChartWorkspace() {
   const handleRemoveAllForSymbol = useCallback(() => {
     commitDrawings((prev) => prev.filter((d) => d.symbol !== instrument.symbol), true);
     setSelectedDrawingId(null);
-  }, [commitDrawings, instrument.symbol]);
+    setConfirmRemoveAllOpen(false);
+    pushToast({
+      title: 'Drawings cleared',
+      description: `Removed all drawings on ${instrument.symbol}`,
+      variant: 'info',
+    });
+  }, [commitDrawings, instrument.symbol, pushToast]);
 
   const handleToggleLockAll = useCallback(() => {
     const nextLock = !lockAllDrawings;
@@ -317,7 +482,134 @@ export function ChartWorkspace() {
     );
   }, [lockAllDrawings, commitDrawings, instrument.symbol]);
 
-  // Keyboard Shortcuts: Alt+T, Alt+H, Alt+J, Alt+V, Alt+C, Ctrl+Z, Ctrl+Y, Delete
+  // Template management handlers (strictly scoped by tool type)
+  const handleCreateTemplate = useCallback(
+    (payload: {
+      name: string;
+      tool: Exclude<DrawingTool, 'cursor'>;
+      config: DrawingTemplateConfig;
+    }) => {
+      const def = getDrawingToolDef(payload.tool);
+      const today = new Date().toISOString().slice(0, 10);
+      const newTpl: DrawingTemplate = {
+        id: `tpl-usr-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        name: payload.name,
+        tool: payload.tool,
+        category: def?.category ?? 'lines',
+        isSystemDefault: false,
+        isDefaultForTool: true,
+        createdAt: today,
+        updatedAt: today,
+        config: {
+          ...payload.config,
+          fibLevels: payload.config.fibLevels?.map((l) => ({ ...l })),
+          visibleIntervals: payload.config.visibleIntervals
+            ? [...payload.config.visibleIntervals]
+            : undefined,
+          positionStyle: payload.config.positionStyle
+            ? { ...payload.config.positionStyle }
+            : undefined,
+        },
+      };
+      setTemplates((prev) => [
+        newTpl,
+        ...prev.map((t) =>
+          t.tool === payload.tool ? { ...t, isDefaultForTool: false } : t
+        ),
+      ]);
+      pushToast({
+        title: 'Template saved',
+        description: `"${newTpl.name}" saved for ${def?.name ?? payload.tool}`,
+        variant: 'success',
+      });
+    },
+    [pushToast]
+  );
+
+  const handleRenameTemplate = useCallback((id: string, name: string) => {
+    const today = new Date().toISOString().slice(0, 10);
+    setTemplates((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, name, updatedAt: today } : t))
+    );
+  }, []);
+
+  const handleDuplicateTemplate = useCallback(
+    (id: string) => {
+      const today = new Date().toISOString().slice(0, 10);
+      const orig = templates.find((t) => t.id === id);
+      if (!orig) return;
+      const copy: DrawingTemplate = {
+        ...orig,
+        id: `tpl-usr-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        name: `${orig.name} Copy`,
+        isSystemDefault: false,
+        isDefaultForTool: false,
+        createdAt: today,
+        updatedAt: today,
+        config: {
+          ...orig.config,
+          fibLevels: orig.config.fibLevels?.map((l) => ({ ...l })),
+          visibleIntervals: orig.config.visibleIntervals
+            ? [...orig.config.visibleIntervals]
+            : undefined,
+          positionStyle: orig.config.positionStyle
+            ? { ...orig.config.positionStyle }
+            : undefined,
+        },
+      };
+      setTemplates((prev) => [copy, ...prev]);
+      pushToast({
+        title: 'Template duplicated',
+        description: copy.name,
+        variant: 'info',
+      });
+    },
+    [templates, pushToast]
+  );
+
+  const handleDeleteTemplate = useCallback(
+    (id: string) => {
+      setTemplates((prev) => {
+        const target = prev.find((t) => t.id === id);
+        if (!target || target.isSystemDefault) return prev;
+        const remaining = prev.filter((t) => t.id !== id);
+        if (target.isDefaultForTool) {
+          const fallback = remaining.find((t) => t.tool === target.tool);
+          if (fallback) {
+            return remaining.map((t) =>
+              t.id === fallback.id ? { ...t, isDefaultForTool: true } : t
+            );
+          }
+        }
+        return remaining;
+      });
+      pushToast({
+        title: 'Template deleted',
+        variant: 'info',
+      });
+    },
+    [pushToast]
+  );
+
+  const handleSetDefaultTemplate = useCallback(
+    (id: string) => {
+      const target = templates.find((t) => t.id === id);
+      if (!target) return;
+      setTemplates((prev) =>
+        prev.map((t) =>
+          t.tool === target.tool ? { ...t, isDefaultForTool: t.id === id } : t
+        )
+      );
+      pushToast({
+        title: 'Default template updated',
+        description: `"${target.name}" is now default for ${getDrawingToolDef(target.tool)?.name ?? target.tool}`,
+        variant: 'success',
+      });
+    },
+    [templates, pushToast]
+  );
+
+  // Keyboard Shortcuts: Alt+T/H/J/V/C, Ctrl+Z/Y, Ctrl+C/V, Delete, Escape
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = document.activeElement?.tagName;
@@ -348,14 +640,32 @@ export function ChartWorkspace() {
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         handleRedo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && selectedDrawingId) {
+        e.preventDefault();
+        handleCopyDrawing(selectedDrawingId);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v' && clipboardDrawing) {
+        e.preventDefault();
+        handlePasteDrawing();
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDrawingId) {
         e.preventDefault();
         handleDeleteDrawing(selectedDrawingId);
+      } else if (e.key === 'Escape' && selectedDrawingId && activeTool === 'cursor') {
+        setSelectedDrawingId(null);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleSelectTool, handleUndo, handleRedo, selectedDrawingId, handleDeleteDrawing]);
+  }, [
+    handleSelectTool,
+    handleUndo,
+    handleRedo,
+    selectedDrawingId,
+    clipboardDrawing,
+    activeTool,
+    handleCopyDrawing,
+    handlePasteDrawing,
+    handleDeleteDrawing,
+  ]);
 
   const issueNav = (type: NavCommand['type'], targetIndex?: number) => {
     setNavCommand((prev) => ({ seq: (prev?.seq ?? 0) + 1, type, targetIndex }));
@@ -384,6 +694,34 @@ export function ChartWorkspace() {
   const selectedDrawing = useMemo(
     () => activeDrawings.find((d) => d.id === selectedDrawingId) ?? null,
     [activeDrawings, selectedDrawingId]
+  );
+
+  const handleApplyTemplate = useCallback(
+    (tpl: DrawingTemplate) => {
+      setTemplates((prev) =>
+        prev.map((t) =>
+          t.tool === tpl.tool ? { ...t, isDefaultForTool: t.id === tpl.id } : t
+        )
+      );
+
+      if (selectedDrawing && selectedDrawing.tool === tpl.tool) {
+        const patch = applyTemplateConfigToDrawing(selectedDrawing, tpl.config);
+        handleUpdateDrawing(selectedDrawing.id, patch, true);
+        pushToast({
+          title: 'Template applied',
+          description: `Applied "${tpl.name}" to ${selectedDrawing.name}`,
+          variant: 'success',
+        });
+      } else {
+        const def = getDrawingToolDef(tpl.tool);
+        pushToast({
+          title: 'Template activated',
+          description: `"${tpl.name}" set for new ${def?.name ?? tpl.tool} drawings`,
+          variant: 'success',
+        });
+      }
+    },
+    [selectedDrawing, handleUpdateDrawing, pushToast]
   );
 
   const activeWatchlist = useMemo(
@@ -512,6 +850,21 @@ export function ChartWorkspace() {
               {compareInstrument ? `vs ${compareInstrument.symbol}` : 'Compare'}
             </span>
           </button>
+
+          {/* TEMPLATE */}
+          <button
+            type="button"
+            onClick={() => setTemplateModalOpen(true)}
+            title="Manage Drawing Templates"
+            className={`h-7 px-2.5 flex items-center gap-1.5 text-xs font-medium rounded transition-colors cursor-pointer whitespace-nowrap ${
+              templateModalOpen
+                ? 'bg-[#2962FF]/15 text-[#2962FF]'
+                : 'text-[var(--text-primary)] hover:bg-[var(--bg-panel)]'
+            }`}
+          >
+            <Bookmark className="w-3.5 h-3.5 text-[#2962FF]" />
+            <span>TEMPLATE</span>
+          </button>
         </div>
 
         {/* Right Toolbar Actions */}
@@ -608,7 +961,7 @@ export function ChartWorkspace() {
           hasSelectedDrawing={Boolean(selectedDrawingId)}
           hasAnyDrawings={activeDrawings.length > 0}
           onRemoveSelected={() => selectedDrawingId && handleDeleteDrawing(selectedDrawingId)}
-          onRemoveAll={handleRemoveAllForSymbol}
+          onRemoveAll={() => setConfirmRemoveAllOpen(true)}
           canUndo={canUndo}
           canRedo={canRedo}
           onUndo={handleUndo}
@@ -632,10 +985,16 @@ export function ChartWorkspace() {
             {selectedDrawing && (
               <DrawingContextualToolbar
                 drawing={selectedDrawing}
+                instrument={instrument}
+                anchorBounds={selectionBounds}
+                hasClipboard={Boolean(clipboardDrawing)}
                 onUpdate={(id, patch) => handleUpdateDrawing(id, patch, true)}
-                onDuplicate={handleDuplicateDrawing}
+                onClone={handleCloneDrawing}
+                onCopy={handleCopyDrawing}
+                onPaste={handlePasteDrawing}
                 onDelete={handleDeleteDrawing}
-                decimals={instrument.decimals}
+                onVisualOrder={handleVisualOrder}
+                onOpenTemplates={() => setTemplateModalOpen(true)}
               />
             )}
 
@@ -649,10 +1008,12 @@ export function ChartWorkspace() {
               compareCandles={compareCandles}
               activeTool={activeTool}
               drawings={activeDrawings}
+              templates={templates}
               selectedDrawingId={selectedDrawingId}
               onSelectDrawing={setSelectedDrawingId}
               onAddDrawing={handleAddDrawing}
               onUpdateDrawing={handleUpdateDrawing}
+              onSelectionBoundsChange={setSelectionBounds}
               magnetMode={magnetMode}
               hideAllDrawings={hideAllDrawings}
               crosshairEnabled={crosshairEnabled}
@@ -850,6 +1211,7 @@ export function ChartWorkspace() {
                 <DrawingObjectManager
                   drawings={activeDrawings}
                   selectedId={selectedDrawingId}
+                  currentTimeframe={timeframe}
                   onSelectDrawing={(id) => {
                     setSelectedDrawingId(id);
                     setActiveTool('cursor');
@@ -857,10 +1219,13 @@ export function ChartWorkspace() {
                   onLocateDrawing={(d) => {
                     if (d.points[0]) {
                       issueNav('locate', d.points[0].index);
+                    } else if (d.positionData) {
+                      issueNav('locate', d.positionData.startIndex);
                     }
                   }}
                   onUpdateDrawing={(id, patch) => handleUpdateDrawing(id, patch, true)}
                   onBatchUpdateDrawings={handleBatchUpdateDrawings}
+                  onVisualOrder={handleVisualOrder}
                   onDeleteDrawing={handleDeleteDrawing}
                 />
               </div>
@@ -1056,6 +1421,7 @@ export function ChartWorkspace() {
             <DrawingObjectManager
               drawings={activeDrawings}
               selectedId={selectedDrawingId}
+              currentTimeframe={timeframe}
               onSelectDrawing={(id) => {
                 setSelectedDrawingId(id);
                 setActiveTool('cursor');
@@ -1063,10 +1429,13 @@ export function ChartWorkspace() {
               onLocateDrawing={(d) => {
                 if (d.points[0]) {
                   issueNav('locate', d.points[0].index);
+                } else if (d.positionData) {
+                  issueNav('locate', d.positionData.startIndex);
                 }
               }}
               onUpdateDrawing={(id, patch) => handleUpdateDrawing(id, patch, true)}
               onBatchUpdateDrawings={handleBatchUpdateDrawings}
+              onVisualOrder={handleVisualOrder}
               onDeleteDrawing={handleDeleteDrawing}
               onClose={() => setRightPanelTab('market')}
             />
@@ -1172,6 +1541,43 @@ export function ChartWorkspace() {
               />
             </label>
           ))}
+        </div>
+      </Modal>
+
+      {/* Drawing Template Manager Modal */}
+      <DrawingTemplateManager
+        open={templateModalOpen}
+        onClose={() => setTemplateModalOpen(false)}
+        templates={templates}
+        selectedDrawing={selectedDrawing}
+        activeTool={activeTool}
+        onCreateTemplate={handleCreateTemplate}
+        onApplyTemplate={handleApplyTemplate}
+        onRenameTemplate={handleRenameTemplate}
+        onDuplicateTemplate={handleDuplicateTemplate}
+        onDeleteTemplate={handleDeleteTemplate}
+        onSetDefaultTemplate={handleSetDefaultTemplate}
+      />
+
+      {/* Destructive Confirmation: Remove All Drawings for Symbol */}
+      <Modal
+        open={confirmRemoveAllOpen}
+        onClose={() => setConfirmRemoveAllOpen(false)}
+        title={`Remove All Drawings on ${instrument.symbol}?`}
+        subtitle="You can undo this action immediately with Ctrl+Z if needed."
+      >
+        <div className="space-y-4">
+          <p className="text-xs text-[var(--text-secondary)]">
+            This will remove all <span className="font-mono font-semibold text-[var(--text-primary)]">{activeDrawings.length}</span> drawing object{activeDrawings.length === 1 ? '' : 's'} currently placed on <span className="font-mono font-semibold text-[var(--text-primary)]">{instrument.symbol}</span>.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setConfirmRemoveAllOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="danger" onClick={handleRemoveAllForSymbol}>
+              Remove All
+            </Button>
+          </div>
         </div>
       </Modal>
     </div>
