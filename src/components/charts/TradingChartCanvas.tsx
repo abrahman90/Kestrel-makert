@@ -30,6 +30,24 @@ export interface ChartVisualSettings {
   logScale: boolean;
 }
 
+export interface CandleColorSettings {
+  upBody: string;
+  upWick: string;
+  upBorder: string;
+  downBody: string;
+  downWick: string;
+  downBorder: string;
+}
+
+export const DEFAULT_CANDLE_COLORS: CandleColorSettings = {
+  upBody: '#089981',
+  upWick: '#089981',
+  upBorder: '#089981',
+  downBody: '#F23645',
+  downWick: '#F23645',
+  downBorder: '#F23645',
+};
+
 export interface NavCommand {
   seq: number;
   type: 'zoom_in' | 'zoom_out' | 'scroll_left' | 'scroll_right' | 'reset' | 'fit' | 'locate';
@@ -54,6 +72,7 @@ interface TradingChartCanvasProps {
   hideAllDrawings: boolean;
   crosshairEnabled: boolean;
   visualSettings: ChartVisualSettings;
+  candleColors: CandleColorSettings;
   theme: 'dark' | 'light';
   onHoverCandle?: (candle: Candle | null, index: number | null) => void;
   navCommand: NavCommand | null;
@@ -116,6 +135,7 @@ export function TradingChartCanvas({
   hideAllDrawings,
   crosshairEnabled,
   visualSettings,
+  candleColors,
   theme,
   onHoverCandle,
   navCommand,
@@ -565,7 +585,7 @@ export function TradingChartCanvas({
         const x = indexToX(i);
         const h = (c.volume / maxVol) * volMaxH;
         const isUp = c.close >= c.open;
-        ctx.fillStyle = isUp ? 'rgba(8, 153, 129, 0.25)' : 'rgba(242, 54, 69, 0.25)';
+        ctx.fillStyle = hexToRgba(isUp ? candleColors.upBody : candleColors.downBody, 0.25);
         ctx.fillRect(x - barW / 2, topPad + mainPaneHeight - h, barW, h);
       }
     }
@@ -662,9 +682,11 @@ export function TradingChartCanvas({
         const yHigh = priceToY(c.high);
         const yLow = priceToY(c.low);
         const isUp = c.close >= c.open;
-        const color = isUp ? palette.up : palette.down;
+        const bodyColor = isUp ? candleColors.upBody : candleColors.downBody;
+        const wickColor = isUp ? candleColors.upWick : candleColors.downWick;
+        const borderColor = isUp ? candleColors.upBorder : candleColors.downBorder;
 
-        ctx.strokeStyle = color;
+        ctx.strokeStyle = wickColor;
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(Math.round(x) + 0.5, yHigh);
@@ -674,12 +696,15 @@ export function TradingChartCanvas({
         const bodyTop = Math.min(yOpen, yClose);
         const bodyH = Math.max(1.5, Math.abs(yClose - yOpen));
         if (chartStyle === 'hollow' && isUp) {
-          ctx.strokeStyle = color;
+          ctx.strokeStyle = borderColor;
           ctx.lineWidth = 1.25;
           ctx.strokeRect(x - candleW / 2, bodyTop, candleW, bodyH);
         } else {
-          ctx.fillStyle = color;
+          ctx.fillStyle = bodyColor;
           ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH);
+          ctx.strokeStyle = borderColor;
+          ctx.lineWidth = 0.75;
+          ctx.strokeRect(x - candleW / 2, bodyTop, candleW, bodyH);
         }
       }
     }
@@ -1990,6 +2015,7 @@ export function TradingChartCanvas({
     hideAllDrawings,
     crosshairEnabled,
     visualSettings,
+    candleColors,
     theme,
     chartStyle,
     timeframe,

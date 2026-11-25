@@ -40,7 +40,13 @@ import { Button, Modal, PriceChangeText, Select, SignalLabel } from '../ui/Desig
 import { DrawingContextualToolbar } from './DrawingContextualToolbar';
 import { DrawingObjectManager } from './DrawingObjectManager';
 import { DrawingToolbar } from './DrawingToolbar';
-import { ChartVisualSettings, NavCommand, TradingChartCanvas } from './TradingChartCanvas';
+import {
+  CandleColorSettings,
+  ChartVisualSettings,
+  DEFAULT_CANDLE_COLORS,
+  NavCommand,
+  TradingChartCanvas,
+} from './TradingChartCanvas';
 
 const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W'];
 
@@ -168,6 +174,7 @@ export function ChartWorkspace() {
     showVolume: true,
     logScale: false,
   });
+  const [candleColors, setCandleColors] = useState<CandleColorSettings>(DEFAULT_CANDLE_COLORS);
 
   const commitDrawings = useCallback(
     (updater: (prev: ChartDrawing[]) => ChartDrawing[], recordHistory = true) => {
@@ -655,10 +662,11 @@ export function ChartWorkspace() {
               onUpdateDrawing={handleUpdateDrawing}
               magnetMode={magnetMode}
               hideAllDrawings={hideAllDrawings}
-              crosshairEnabled={crosshairEnabled}
-              visualSettings={visualSettings}
-              theme={theme}
-              onHoverCandle={(c) => setHoveredCandle(c)}
+               crosshairEnabled={crosshairEnabled}
+               visualSettings={visualSettings}
+               candleColors={candleColors}
+               theme={theme}
+               onHoverCandle={(c) => setHoveredCandle(c)}
               navCommand={navCommand}
               onCancelTool={() => setActiveTool('cursor')}
             />
@@ -1172,6 +1180,38 @@ export function ChartWorkspace() {
               />
             </label>
           ))}
+          <section className="mt-4 border-t border-[var(--border-subtle)] pt-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div>
+                <h3 className="text-xs font-semibold text-[var(--text-primary)]">Candlestick Colors</h3>
+                <p className="mt-0.5 text-[11px] text-[var(--text-secondary)]">Customize rising and falling candle details.</p>
+              </div>
+              <Button variant="ghost" onClick={() => setCandleColors(DEFAULT_CANDLE_COLORS)}>
+                Reset
+              </Button>
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+              {([
+                ['upBody', 'Rising body'],
+                ['upWick', 'Rising wick'],
+                ['upBorder', 'Rising border'],
+                ['downBody', 'Falling body'],
+                ['downWick', 'Falling wick'],
+                ['downBorder', 'Falling border'],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="flex items-center justify-between gap-2 text-xs text-[var(--text-primary)]">
+                  <span>{label}</span>
+                  <input
+                    aria-label={label}
+                    type="color"
+                    value={candleColors[key]}
+                    onChange={(event) => setCandleColors((current) => ({ ...current, [key]: event.target.value }))}
+                    className="h-7 w-10 cursor-pointer rounded border border-[var(--border-subtle)] bg-transparent p-0.5"
+                  />
+                </label>
+              ))}
+            </div>
+          </section>
         </div>
       </Modal>
     </div>
