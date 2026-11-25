@@ -9,6 +9,8 @@ import {
   ChevronRight,
   Clock,
   Crosshair,
+  Eye,
+  EyeOff,
   GitCompare,
   Maximize,
   Maximize2,
@@ -124,12 +126,12 @@ function deepCloneDrawing(
 }
 
 const INITIAL_INDICATORS: IndicatorConfig[] = [
-  { id: 'volume', label: 'Volume Histogram', shortName: 'Vol', category: 'Overlay', enabled: true, color: '#089981', params: {} },
-  { id: 'ema20', label: 'Exponential Moving Average (20)', shortName: 'EMA 20', category: 'Overlay', enabled: true, color: '#F0B90B', params: { period: 20 } },
-  { id: 'ema50', label: 'Exponential Moving Average (50)', shortName: 'EMA 50', category: 'Overlay', enabled: true, color: '#2962FF', params: { period: 50 } },
+  { id: 'volume', label: 'Volume Histogram', shortName: 'Vol', category: 'Overlay', enabled: false, color: '#089981', params: {} },
+  { id: 'ema20', label: 'Exponential Moving Average (20)', shortName: 'EMA 20', category: 'Overlay', enabled: false, color: '#F0B90B', params: { period: 20 } },
+  { id: 'ema50', label: 'Exponential Moving Average (50)', shortName: 'EMA 50', category: 'Overlay', enabled: false, color: '#2962FF', params: { period: 50 } },
   { id: 'sma200', label: 'Long-Term Moving Average (100)', shortName: 'SMA 100', category: 'Overlay', enabled: false, color: '#AB47BC', params: { period: 100 } },
   { id: 'bb', label: 'Bollinger Bands (20, 2)', shortName: 'BB(20,2)', category: 'Overlay', enabled: false, color: '#2962FF', params: { period: 20, mult: 2 } },
-  { id: 'rsi', label: 'Relative Strength Index (14)', shortName: 'RSI(14)', category: 'Oscillator', enabled: true, color: '#AB47BC', params: { period: 14 } },
+  { id: 'rsi', label: 'Relative Strength Index (14)', shortName: 'RSI(14)', category: 'Oscillator', enabled: false, color: '#AB47BC', params: { period: 14 } },
   { id: 'macd', label: 'MACD (12, 26, 9)', shortName: 'MACD', category: 'Oscillator', enabled: false, color: '#2962FF', params: { fast: 12, slow: 26, signal: 9 } },
 ];
 
@@ -203,6 +205,12 @@ export function ChartWorkspace() {
 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const timezoneMenuRef = useRef<HTMLDivElement>(null);
+  const lastActiveIndicatorIdsRef = useRef<IndicatorConfig['id'][]>([
+    'ema20',
+    'ema50',
+    'volume',
+    'rsi',
+  ]);
 
   const instrument = useMemo(
     () => instruments.find((i) => i.symbol === selectedSymbol) ?? instruments[0],
@@ -788,7 +796,48 @@ export function ChartWorkspace() {
   );
 
   const toggleIndicator = (id: IndicatorConfig['id']) => {
-    setIndicators((prev) => prev.map((ind) => (ind.id === id ? { ...ind, enabled: !ind.enabled } : ind)));
+    setIndicators((prev) =>
+      prev.map((ind) => {
+        if (ind.id !== id) return ind;
+        const nextEnabled = !ind.enabled;
+        if (id === 'volume' && nextEnabled) {
+          setVisualSettings((vs) => (vs.showVolume ? vs : { ...vs, showVolume: true }));
+        }
+        return { ...ind, enabled: nextEnabled };
+      })
+    );
+  };
+
+  const clearAllIndicators = () => {
+    const activeIds = indicators.filter((i) => i.enabled).map((i) => i.id);
+    if (activeIds.length > 0) {
+      lastActiveIndicatorIdsRef.current = activeIds;
+    }
+    setIndicators((prev) => prev.map((ind) => ({ ...ind, enabled: false })));
+  };
+
+  const enableStandardIndicators = () => {
+    const target = new Set<IndicatorConfig['id']>(['ema20', 'ema50', 'volume', 'rsi']);
+    setVisualSettings((vs) => (vs.showVolume ? vs : { ...vs, showVolume: true }));
+    setIndicators((prev) => prev.map((ind) => ({ ...ind, enabled: target.has(ind.id) })));
+  };
+
+  const toggleAllLinesAndPanes = () => {
+    const activeIds = indicators.filter((i) => i.enabled).map((i) => i.id);
+    if (activeIds.length > 0) {
+      lastActiveIndicatorIdsRef.current = activeIds;
+      setIndicators((prev) => prev.map((ind) => ({ ...ind, enabled: false })));
+    } else {
+      const restoreSet = new Set(
+        lastActiveIndicatorIdsRef.current.length > 0
+          ? lastActiveIndicatorIdsRef.current
+          : (['ema20', 'ema50', 'volume', 'rsi'] as IndicatorConfig['id'][])
+      );
+      if (restoreSet.has('volume')) {
+        setVisualSettings((vs) => (vs.showVolume ? vs : { ...vs, showVolume: true }));
+      }
+      setIndicators((prev) => prev.map((ind) => ({ ...ind, enabled: restoreSet.has(ind.id) })));
+    }
   };
 
   const handleToggleFullscreen = () => {
@@ -885,6 +934,31 @@ export function ChartWorkspace() {
             <span>Indicators</span>
             <span className="font-mono text-[11px] text-[var(--text-muted)]">
               ({enabledIndicators.length})
+            </span>
+          </button>
+
+          {/* Quick Toggle for Overlay Lines, Volume & Lower Pane */}
+          <button
+            type="button"
+            onClick={toggleAllLinesAndPanes}
+            title={
+              enabledIndicators.length > 0
+                ? 'Hide all indicator lines, volume bars, and lower chart pane (Show candlesticks only)'
+                : 'Show indicator lines and panes on chart'
+            }
+            className={`h-7 px-2 flex items-center gap-1.5 text-xs font-medium rounded transition-colors cursor-pointer whitespace-nowrap ${
+              enabledIndicators.length > 0
+                ? 'bg-[#2962FF]/15 text-[#2962FF]'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)]'
+            }`}
+          >
+            {enabledIndicators.length > 0 ? (
+              <Eye className="w-3.5 h-3.5" />
+            ) : (
+              <EyeOff className="w-3.5 h-3.5" />
+            )}
+            <span className="hidden lg:inline">
+              {enabledIndicators.length > 0 ? 'Lines On' : 'Chart Only'}
             </span>
           </button>
 
@@ -1076,6 +1150,8 @@ export function ChartWorkspace() {
               onHoverCandle={(c) => setHoveredCandle(c)}
               navCommand={navCommand}
               onCancelTool={() => setActiveTool('cursor')}
+              onToggleIndicator={toggleIndicator}
+              onOpenIndicators={() => setIndicatorsModalOpen(true)}
             />
 
             {/* Floating Chart Navigation Controls Bar (Bottom-Center of Chart) */}
@@ -1562,27 +1638,62 @@ export function ChartWorkspace() {
       <Modal
         open={indicatorsModalOpen}
         onClose={() => setIndicatorsModalOpen(false)}
-        title="Technical Indicators"
-        subtitle={`Configure chart overlays and oscillators for ${instrument.symbol}`}
+        title="Technical Indicators & Chart Lines"
+        subtitle={`Add or remove overlay lines, volume bars, and lower chart oscillators for ${instrument.symbol}`}
       >
-        <div className="space-y-2">
-          {indicators.map((ind) => (
-            <label
-              key={ind.id}
-              className="flex items-center justify-between p-2.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:bg-[var(--bg-panel)] cursor-pointer transition-colors"
-            >
-              <div>
-                <div className="text-xs font-medium text-[var(--text-primary)]">{ind.label}</div>
-                <div className="text-[11px] text-[var(--text-muted)]">{ind.category}</div>
-              </div>
-              <input
-                type="checkbox"
-                checked={ind.enabled}
-                onChange={() => toggleIndicator(ind.id)}
-                className="w-4 h-4 accent-[#2962FF] cursor-pointer"
-              />
-            </label>
-          ))}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2 pb-2 border-b border-[var(--border-subtle)]">
+            <span className="text-[11px] text-[var(--text-secondary)]">
+              {enabledIndicators.length === 0
+                ? 'Clean chart mode — candlesticks only'
+                : `${enabledIndicators.length} active on chart`}
+            </span>
+            <div className="flex items-center gap-1.5">
+              <Button size="xs" variant="secondary" onClick={enableStandardIndicators}>
+                Standard Lines
+              </Button>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={clearAllIndicators}
+                disabled={enabledIndicators.length === 0}
+              >
+                Remove All (Chart Only)
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {indicators.map((ind) => (
+              <label
+                key={ind.id}
+                className="flex items-center justify-between p-2.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:bg-[var(--bg-panel)] cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-2.5">
+                  <span
+                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                    style={{ backgroundColor: ind.color }}
+                  />
+                  <div>
+                    <div className="text-xs font-medium text-[var(--text-primary)]">{ind.label}</div>
+                    <div className="text-[11px] text-[var(--text-muted)]">
+                      {ind.id === 'volume'
+                        ? 'Bottom Candle Overlay'
+                        : ind.category === 'Oscillator'
+                        ? 'Lower Sub-Pane Below Chart'
+                        : 'Price Chart Line'}
+                    </div>
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={ind.enabled}
+                  onChange={() => toggleIndicator(ind.id)}
+                  className="w-4 h-4 accent-[#2962FF] cursor-pointer"
+                />
+              </label>
+            ))}
+          </div>
         </div>
       </Modal>
 
@@ -1648,10 +1759,24 @@ export function ChartWorkspace() {
               <span className="text-xs font-medium text-[var(--text-primary)]">{item.label}</span>
               <input
                 type="checkbox"
-                checked={visualSettings[item.key]}
-                onChange={() =>
-                  setVisualSettings((prev) => ({ ...prev, [item.key]: !prev[item.key] }))
+                checked={
+                  item.key === 'showVolume'
+                    ? visualSettings.showVolume &&
+                      Boolean(indicators.find((i) => i.id === 'volume')?.enabled)
+                    : visualSettings[item.key]
                 }
+                onChange={() => {
+                  if (item.key === 'showVolume') {
+                    const volEnabled = Boolean(indicators.find((i) => i.id === 'volume')?.enabled);
+                    const nextVol = !(visualSettings.showVolume && volEnabled);
+                    setVisualSettings((prev) => ({ ...prev, showVolume: nextVol }));
+                    setIndicators((prev) =>
+                      prev.map((ind) => (ind.id === 'volume' ? { ...ind, enabled: nextVol } : ind))
+                    );
+                  } else {
+                    setVisualSettings((prev) => ({ ...prev, [item.key]: !prev[item.key] }));
+                  }
+                }}
                 className="w-4 h-4 accent-[#2962FF] cursor-pointer"
               />
             </label>

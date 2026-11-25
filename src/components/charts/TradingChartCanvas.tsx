@@ -70,6 +70,8 @@ interface TradingChartCanvasProps {
   onHoverCandle?: (candle: Candle | null, index: number | null) => void;
   navCommand: NavCommand | null;
   onCancelTool: () => void;
+  onToggleIndicator?: (id: IndicatorConfig['id']) => void;
+  onOpenIndicators?: () => void;
 }
 
 interface PendingPoint {
@@ -151,11 +153,14 @@ export function TradingChartCanvas({
   onHoverCandle,
   navCommand,
   onCancelTool,
+  onToggleIndicator,
+  onOpenIndicators,
 }: TradingChartCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [size, setSize] = useState({ width: 900, height: 520 });
+  const [legendCollapsed, setLegendCollapsed] = useState(false);
   const [visibleCount, setVisibleCount] = useState(85);
   const [rightOffset, setRightOffset] = useState(0);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
@@ -3009,35 +3014,90 @@ export function TradingChartCanvas({
 
   return (
     <div ref={containerRef} className="relative w-full h-full overflow-hidden select-none">
-      {/* Live OHLC + Indicator Overlay Legend */}
-      <div className="pointer-events-none absolute top-2 left-3 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono tabular-nums bg-[var(--bg-canvas)]/75 backdrop-blur-[2px] px-2 py-1 rounded border border-[var(--border-subtle)]/60">
-        <span className="font-sans font-semibold text-[var(--text-primary)]">
-          {instrument.symbol} · {timeframe}
-        </span>
-        {activeCandle && (
-          <>
-            <span className="text-[var(--text-secondary)]">
-              O <span className={isUpBar ? 'text-[#089981]' : 'text-[#F23645]'}>{formatPrice(activeCandle.open, instrument.decimals)}</span>
-            </span>
-            <span className="text-[var(--text-secondary)]">
-              H <span className={isUpBar ? 'text-[#089981]' : 'text-[#F23645]'}>{formatPrice(activeCandle.high, instrument.decimals)}</span>
-            </span>
-            <span className="text-[var(--text-secondary)]">
-              L <span className={isUpBar ? 'text-[#089981]' : 'text-[#F23645]'}>{formatPrice(activeCandle.low, instrument.decimals)}</span>
-            </span>
-            <span className="text-[var(--text-secondary)]">
-              C <span className={isUpBar ? 'text-[#089981]' : 'text-[#F23645]'}>{formatPrice(activeCandle.close, instrument.decimals)}</span>
-            </span>
-            <span className="text-[var(--text-secondary)]">
-              Vol <span className="text-[var(--text-primary)]">{activeCandle.volume.toLocaleString()}</span>
-            </span>
-          </>
-        )}
-        {compareInstrument && (
-          <span className="text-[#F0B90B]">
-            vs {compareInstrument.symbol} ({compareInstrument.changePercent >= 0 ? '+' : ''}
-            {compareInstrument.changePercent.toFixed(2)}%)
+      {/* Live OHLC + Interactive Indicator Overlay Legend */}
+      <div className="pointer-events-none absolute top-2 left-3 z-10 flex flex-col items-start gap-1 max-w-[calc(100%-84px)]">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-mono tabular-nums bg-[var(--bg-canvas)]/75 backdrop-blur-[2px] px-2 py-1 rounded border border-[var(--border-subtle)]/60">
+          <span className="font-sans font-semibold text-[var(--text-primary)]">
+            {instrument.symbol} · {timeframe}
           </span>
+          {activeCandle && (
+            <>
+              <span className="text-[var(--text-secondary)]">
+                O <span className={isUpBar ? 'text-[#089981]' : 'text-[#F23645]'}>{formatPrice(activeCandle.open, instrument.decimals)}</span>
+              </span>
+              <span className="text-[var(--text-secondary)]">
+                H <span className={isUpBar ? 'text-[#089981]' : 'text-[#F23645]'}>{formatPrice(activeCandle.high, instrument.decimals)}</span>
+              </span>
+              <span className="text-[var(--text-secondary)]">
+                L <span className={isUpBar ? 'text-[#089981]' : 'text-[#F23645]'}>{formatPrice(activeCandle.low, instrument.decimals)}</span>
+              </span>
+              <span className="text-[var(--text-secondary)]">
+                C <span className={isUpBar ? 'text-[#089981]' : 'text-[#F23645]'}>{formatPrice(activeCandle.close, instrument.decimals)}</span>
+              </span>
+              <span className="text-[var(--text-secondary)]">
+                Vol <span className="text-[var(--text-primary)]">{activeCandle.volume.toLocaleString()}</span>
+              </span>
+            </>
+          )}
+          {compareInstrument && (
+            <span className="text-[#F0B90B]">
+              vs {compareInstrument.symbol} ({compareInstrument.changePercent >= 0 ? '+' : ''}
+              {compareInstrument.changePercent.toFixed(2)}%)
+            </span>
+          )}
+          {onOpenIndicators && (
+            <button
+              type="button"
+              onClick={onOpenIndicators}
+              title="Add or remove indicator lines, volume, and sub-pane oscillators"
+              className="pointer-events-auto ml-1 px-1.5 py-0.5 rounded bg-[var(--bg-surface)]/90 hover:bg-[var(--bg-panel)] border border-[var(--border-subtle)] text-[10px] font-sans font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+            >
+              {indicators.some((i) => i.enabled)
+                ? `Lines (${indicators.filter((i) => i.enabled).length})`
+                : '+ Lines'}
+            </button>
+          )}
+        </div>
+
+        {indicators.some((i) => i.enabled) && (
+          <div className="pointer-events-auto flex flex-col items-start gap-1">
+            {!legendCollapsed && (
+              <div className="flex flex-wrap items-center gap-1">
+                {indicators
+                  .filter((i) => i.enabled)
+                  .map((ind) => (
+                    <div
+                      key={ind.id}
+                      className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-[var(--bg-canvas)]/80 backdrop-blur-[2px] border border-[var(--border-subtle)]/70 text-[10.5px] text-[var(--text-primary)]"
+                    >
+                      <span
+                        className="w-2 h-2 rounded-full shrink-0"
+                        style={{ backgroundColor: ind.color }}
+                      />
+                      <span className="font-mono">{ind.shortName}</span>
+                      {onToggleIndicator && (
+                        <button
+                          type="button"
+                          onClick={() => onToggleIndicator(ind.id)}
+                          title={`Remove ${ind.label}`}
+                          className="ml-0.5 text-[var(--text-muted)] hover:text-[#F23645] leading-none cursor-pointer"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => setLegendCollapsed((c) => !c)}
+              title={legendCollapsed ? 'Show active lines list' : 'Collapse active lines list'}
+              className="px-1.5 py-0.5 rounded bg-[var(--bg-surface)]/80 hover:bg-[var(--bg-panel)] border border-[var(--border-subtle)]/70 text-[10px] text-[var(--text-secondary)] cursor-pointer leading-none"
+            >
+              {legendCollapsed ? `▾ ${indicators.filter((i) => i.enabled).length}` : '▴'}
+            </button>
+          </div>
         )}
       </div>
 
