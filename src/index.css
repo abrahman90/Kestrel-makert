@@ -1,0 +1,81 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root {
+  --bg-canvas: #F4F6FA;
+  --bg-surface: #FFFFFF;
+  --bg-panel: #EDF0F7;
+  --bg-elevated: #FFFFFF;
+  --border-subtle: #DCE1EC;
+  --border-strong: #C5CCDB;
+  --text-primary: #131722;
+  --text-secondary: #626775;
+  --text-muted: #868B98;
+  --color-up: #089981;
+  --color-down: #F23645;
+  --color-accent: #2962FF;
+  --color-warning: #D99B00;
+}
+
+.dark {
+  --bg-canvas: #131722;
+  --bg-surface: #1E222D;
+  --bg-panel: #181D27;
+  --bg-elevated: #232836;
+  --border-subtle: #2A2E39;
+  --border-strong: #363C4E;
+  --text-primary: #D1D4DC;
+  --text-secondary: #787B86;
+  --text-muted: #5D606B;
+  --color-up: #089981;
+  --color-down: #F23645;
+  --color-accent: #2962FF;
+  --color-warning: #F0B90B;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    font-family: var(--font-sans);
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Precision thin scrollbars for institutional data density */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 123, 134, 0.28);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 123, 134, 0.48);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Kestrel Markets",
+  "description": "Multi-market financial analysis, technical charting, and market intelligence platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
