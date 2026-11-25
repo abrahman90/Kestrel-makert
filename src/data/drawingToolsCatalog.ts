@@ -48,13 +48,108 @@ import {
   StickyNote,
   Table2,
   Tag,
-  TrendingDown,
   TrendingUp,
   Triangle,
   Type,
   Waypoints,
 } from 'lucide-react';
 import { DrawingCategoryId, DrawingTool, FibLevelConfig } from '../types/market';
+
+function TrendlineIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return React.createElement(
+    'svg',
+    {
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 1.75,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      className,
+    },
+    React.createElement('line', { x1: 6.5, y1: 17.5, x2: 17.5, y2: 6.5 }),
+    React.createElement('circle', { cx: 5, cy: 19, r: 2.2, fill: 'none' }),
+    React.createElement('circle', { cx: 19, cy: 5, r: 2.2, fill: 'none' })
+  );
+}
+
+function LongPositionIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return React.createElement(
+    'svg',
+    {
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 1.65,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      className,
+    },
+    // Target zone (larger top box)
+    React.createElement('rect', {
+      x: 5,
+      y: 4,
+      width: 14,
+      height: 9,
+      rx: 1,
+      fill: 'currentColor',
+      fillOpacity: 0.16,
+      strokeWidth: 1.4,
+    }),
+    // Stop zone (smaller bottom box)
+    React.createElement('rect', {
+      x: 5,
+      y: 13,
+      width: 14,
+      height: 6,
+      rx: 1,
+      strokeWidth: 1.4,
+    }),
+    // Entry divider & left/right handles
+    React.createElement('line', { x1: 3.5, y1: 13, x2: 20.5, y2: 13, strokeWidth: 1.8 }),
+    React.createElement('circle', { cx: 5, cy: 4, r: 1.4, fill: 'currentColor', stroke: 'none' }),
+    React.createElement('circle', { cx: 5, cy: 19, r: 1.4, fill: 'currentColor', stroke: 'none' })
+  );
+}
+
+function ShortPositionIcon({ className = 'w-4 h-4' }: { className?: string }) {
+  return React.createElement(
+    'svg',
+    {
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 1.65,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      className,
+    },
+    // Stop zone (smaller top box)
+    React.createElement('rect', {
+      x: 5,
+      y: 5,
+      width: 14,
+      height: 6,
+      rx: 1,
+      strokeWidth: 1.4,
+    }),
+    // Target zone (larger bottom box)
+    React.createElement('rect', {
+      x: 5,
+      y: 11,
+      width: 14,
+      height: 9,
+      rx: 1,
+      fill: 'currentColor',
+      fillOpacity: 0.16,
+      strokeWidth: 1.4,
+    }),
+    // Entry divider & left/right handles
+    React.createElement('line', { x1: 3.5, y1: 11, x2: 20.5, y2: 11, strokeWidth: 1.8 }),
+    React.createElement('circle', { cx: 5, cy: 5, r: 1.4, fill: 'currentColor', stroke: 'none' }),
+    React.createElement('circle', { cx: 5, cy: 20, r: 1.4, fill: 'currentColor', stroke: 'none' })
+  );
+}
 
 export interface DrawingToolDef {
   id: Exclude<DrawingTool, 'cursor'>;
@@ -91,13 +186,13 @@ export const DRAWING_CATEGORIES: DrawingCategoryDef[] = [
     id: 'lines',
     label: 'LINES',
     shortLabel: 'Lines',
-    icon: TrendingUp,
+    icon: TrendlineIcon,
     tools: [
       {
         id: 'trendline',
         name: 'Trendline',
         category: 'lines',
-        icon: TrendingUp,
+        icon: TrendlineIcon,
         shortcut: 'Alt+T',
         pointsRequired: 2,
         defaultColor: '#2962FF',
@@ -397,13 +492,13 @@ export const DRAWING_CATEGORIES: DrawingCategoryDef[] = [
     id: 'forecasting',
     label: 'FORECASTING & MEASUREMENT',
     shortLabel: 'Forecast',
-    icon: BarChart3,
+    icon: LongPositionIcon,
     tools: [
       {
         id: 'long_position',
         name: 'Long Position',
         category: 'forecasting',
-        icon: TrendingUp,
+        icon: LongPositionIcon,
         pointsRequired: 2,
         defaultColor: '#089981',
         hint: 'Click entry price and target/stop span for Long Position R:R tool',
@@ -412,7 +507,7 @@ export const DRAWING_CATEGORIES: DrawingCategoryDef[] = [
         id: 'short_position',
         name: 'Short Position',
         category: 'forecasting',
-        icon: TrendingDown,
+        icon: ShortPositionIcon,
         pointsRequired: 2,
         defaultColor: '#F23645',
         hint: 'Click entry price and target/stop span for Short Position R:R tool',

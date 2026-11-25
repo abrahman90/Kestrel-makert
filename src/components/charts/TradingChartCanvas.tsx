@@ -28,6 +28,7 @@ import {
   formatMetricNumber,
   getInstrumentTickMeta,
 } from '../../utils/positionMetrics';
+import { formatChartTimestamp } from '../../utils/timezone';
 import { SelectionBounds } from './DrawingContextualToolbar';
 import { DrawingTemplate, PositionDrawingData } from '../../types/market';
 
@@ -48,6 +49,7 @@ interface TradingChartCanvasProps {
   instrument: Instrument;
   candles: Candle[];
   timeframe: Timeframe;
+  timezone?: string;
   chartStyle: ChartStyle;
   indicators: IndicatorConfig[];
   compareInstrument: Instrument | null;
@@ -128,6 +130,7 @@ export function TradingChartCanvas({
   instrument,
   candles,
   timeframe,
+  timezone = 'America/New_York',
   chartStyle,
   indicators,
   compareInstrument,
@@ -467,11 +470,11 @@ export function TradingChartCanvas({
     const slY = priceToY(pos.stopLoss);
 
     return [
-      { drawingId: d.id, handle: 'tp', x: midX, y: tpY, label: 'Take Profit' },
-      { drawingId: d.id, handle: 'sl', x: midX, y: slY, label: 'Stop Loss' },
-      { drawingId: d.id, handle: 'entry', x: midX, y: entryY, label: 'Entry Price' },
+      { drawingId: d.id, handle: 'tp', x: leftX, y: tpY, label: 'Take Profit' },
+      { drawingId: d.id, handle: 'sl', x: leftX, y: slY, label: 'Stop Loss' },
       { drawingId: d.id, handle: 'left_time', x: leftX, y: entryY, label: 'Start Time' },
       { drawingId: d.id, handle: 'right_time', x: rightX, y: entryY, label: 'End Time' },
+      { drawingId: d.id, handle: 'entry', x: midX, y: entryY, label: 'Entry Price' },
     ];
   };
 
@@ -719,13 +722,13 @@ export function TradingChartCanvas({
         ctx.stroke();
       }
 
-      const d = new Date(c.time * 1000);
-      const label =
-        timeframe === '1M'
-          ? d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' })
-          : timeframe === '1D' || timeframe === '1W'
-          ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-          : d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+      const label = formatChartTimestamp(
+        c.time,
+        timeframe,
+        timezone,
+        instrument.exchange,
+        'axis'
+      );
       ctx.fillStyle = palette.axisText;
       ctx.fillText(label, x, size.height - timeAxisHeight + 7);
     }
@@ -1440,42 +1443,123 @@ export function TradingChartCanvas({
           break;
         }
 
-        // --- CATEGORY F: FORECASTING (INDEPENDENT TP/SL/ENTRY) ---
+        // --- CATEGORY F: FORECASTING (INDEPENDENT TP/SL/ENTRY, TRADINGVIEW-STYLE LONG & SHORT) ---
         case 'long_position':
         case 'short_position': {
           const pos = resolvePositionData(d);
           if (!pos) break;
+          const isLong = d.tool === 'long_position';
           const left = indexToX(pos.startIndex);
           const right = Math.max(left + 52, indexToX(pos.endIndex));
           const width = right - left;
+          const centerX = left + width / 2;
           const entryY = priceToY(pos.entryPrice);
           const tpY = priceToY(pos.takeProfit);
           const slY = priceToY(pos.stopLoss);
-          const zoneAlpha = Math.max(0.12, alpha * 0.24);
+          const zoneAlpha = Math.max(0.16, alpha * 0.25);
 
-          // Profit Zone (from Entry to Take Profit)
+          // Dashed vertical time-boundary guides when selected or hovered (matches TradingView reference)
+          if (isSelected || isHovered) {
+            ctx.save();
+            ctx.strokeStyle = hexToRgba(pos.entryColor, 0.55);
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(left, topPad);
+            ctx.lineTo(left, topPad + mainPaneHeight);
+            ctx.moveTo(right, topPad);
+            ctx.lineTo(right, topPad + mainPaneHeight);
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // Profit Zone (Entry -> Take Profit)
           ctx.fillStyle = hexToRgba(pos.profitColor, zoneAlpha);
           ctx.fillRect(left, Math.min(entryY, tpY), width, Math.abs(tpY - entryY));
 
-          // Loss Zone (from Entry to Stop Loss)
+          // Loss Zone (Entry -> Stop Loss)
           ctx.fillStyle = hexToRgba(pos.lossColor, zoneAlpha);
           ctx.fillRect(left, Math.min(entryY, slY), width, Math.abs(slY - entryY));
 
-          // Profit & Loss zone borders
-          ctx.strokeStyle = hexToRgba(pos.profitColor, isHovered || isSelected ? 0.95 : 0.65);
-          ctx.strokeRect(left, Math.min(entryY, tpY), width, Math.abs(tpY - entryY));
-          ctx.strokeStyle = hexToRgba(pos.lossColor, isHovered || isSelected ? 0.95 : 0.65);
-          ctx.strokeRect(left, Math.min(entryY, slY), width, Math.abs(slY - entryY));
-
-          // Crisp Entry Horizontal Line
-          ctx.strokeStyle = hexToRgba(pos.entryColor, alpha);
-          ctx.lineWidth = Math.max(1.5, d.lineWidth || 1.5);
+          // Clean entry horizontal divider line
+          ctx.save();
+          ctx.strokeStyle = hexToRgba(pos.entryColor, isHovered || isSelected ? 0.95 : 0.75);
+          ctx.lineWidth = Math.max(1.4, d.lineWidth || 1.5);
+          ctx.setLineDash([]);
           ctx.beginPath();
           ctx.moveTo(left, entryY);
           ctx.lineTo(right, entryY);
           ctx.stroke();
+          ctx.restore();
 
-          // Notice: No permanent measurement pill clutter! Detailed R:R, Pips & Points appear cleanly on hover.
+          // Sleek attached Target / Open PnL & R:R / Stop callout banners when selected, hovered, or drafting
+          if (isSelected || isHovered || isDraft) {
+            const metrics = computePositionMetrics(isLong, pos, instrument);
+            const liveMarket = latestCandle?.close ?? instrument.price;
+            const openPnl =
+              (isLong ? liveMarket - pos.entryPrice : pos.entryPrice - liveMarket) *
+              pos.positionSize;
+
+            const drawBanner = (
+              lines: string[],
+              anchorCenterX: number,
+              boxY: number,
+              bgColor: string,
+              borderColor?: string
+            ) => {
+              ctx.save();
+              ctx.font = '600 10.5px "Plus Jakarta Sans", sans-serif';
+              const maxTextW = Math.max(...lines.map((ln) => ctx.measureText(ln).width));
+              const pillW = maxTextW + 16;
+              const lineH = 14;
+              const pillH = lines.length * lineH + 8;
+              const px = Math.max(4, Math.min(plotWidth - pillW - 4, anchorCenterX - pillW / 2));
+              const py = Math.max(topPad + 3, Math.min(topPad + mainPaneHeight - pillH - 3, boxY));
+
+              ctx.fillStyle = bgColor;
+              ctx.beginPath();
+              ctx.roundRect(px, py, pillW, pillH, 3);
+              ctx.fill();
+              if (borderColor) {
+                ctx.strokeStyle = borderColor;
+                ctx.lineWidth = 1;
+                ctx.stroke();
+              }
+
+              ctx.fillStyle = '#FFFFFF';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              lines.forEach((ln, idx) => {
+                ctx.fillText(ln, px + pillW / 2, py + 4 + lineH * (idx + 0.5));
+              });
+              ctx.restore();
+            };
+
+            const tpLabel = `Target: ${formatPrice(metrics.rewardDistance, instrument.decimals)} (${metrics.profitPct.toFixed(2)}%) ${formatMetricNumber(metrics.rewardPips)}, Amount: ${formatMetricNumber(metrics.rewardAmount)}`;
+            const slLabel = `Stop: ${formatPrice(metrics.riskDistance, instrument.decimals)} (${metrics.lossPct.toFixed(2)}%) ${formatMetricNumber(metrics.riskPips)}, Amount: ${formatMetricNumber(metrics.riskAmount)}`;
+            const midLines = [
+              `Open PnL: ${openPnl >= 0 ? '' : '-'}${formatMetricNumber(Math.abs(openPnl))}, Qty: ${formatMetricNumber(pos.positionSize)}`,
+              `Risk/reward ratio: ${metrics.rrRatio.toFixed(2)}`,
+            ];
+
+            // Target banner sits outside the profit edge (above for Long, below for Short)
+            const tpBannerY = isLong ? tpY - 26 : tpY + 6;
+            drawBanner([tpLabel], centerX, tpBannerY, pos.profitColor);
+
+            // Middle PnL + Qty + R:R banner sits cleanly on the profit side of the entry line
+            const midBannerY = isLong ? entryY - 40 : entryY + 6;
+            drawBanner(midLines, centerX, midBannerY, pos.entryColor);
+
+            // Stop banner sits outside the stop edge (below for Long, above for Short)
+            const slBannerY = isLong ? slY + 6 : slY - 26;
+            drawBanner(
+              [slLabel],
+              centerX,
+              slBannerY,
+              theme === 'dark' ? '#1E222D' : '#131722',
+              pos.lossColor
+            );
+          }
           break;
         }
         case 'bar_pattern': {
@@ -1939,15 +2023,10 @@ export function TradingChartCanvas({
               ctx.fillStyle = '#FFFFFF';
               ctx.strokeStyle = accent;
               ctx.lineWidth = isHandleActive ? 2.6 : 2;
-              if (h.handle === 'left_time' || h.handle === 'right_time') {
-                ctx.fillRect(h.x - radius + 1, h.y - radius + 1, (radius - 1) * 2, (radius - 1) * 2);
-                ctx.strokeRect(h.x - radius + 1, h.y - radius + 1, (radius - 1) * 2, (radius - 1) * 2);
-              } else {
-                ctx.beginPath();
-                ctx.arc(h.x, h.y, radius, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.stroke();
-              }
+              ctx.beginPath();
+              ctx.arc(h.x, h.y, radius, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
             });
           }
         } else {
@@ -2189,6 +2268,46 @@ export function TradingChartCanvas({
     ctx.lineTo(size.width, size.height - timeAxisHeight + 0.5);
     ctx.stroke();
 
+    // Selected Long / Short Position time range badges on X-axis (like TradingView)
+    if (!hideAllDrawings && selectedDrawingId) {
+      const selPosDrawing = drawings.find(
+        (d) =>
+          d.id === selectedDrawingId &&
+          isDrawingVisibleOnTimeframe(d, timeframe) &&
+          (d.tool === 'long_position' || d.tool === 'short_position')
+      );
+      if (selPosDrawing) {
+        const pos = resolvePositionData(selPosDrawing);
+        if (pos) {
+          [pos.startIndex, pos.endIndex].forEach((bIdx) => {
+            const clampedIdx = Math.max(0, Math.min(displayCandles.length - 1, bIdx));
+            const c = displayCandles[clampedIdx];
+            if (!c) return;
+            const bx = indexToX(bIdx);
+            if (bx < 0 || bx > plotWidth) return;
+            const ts = formatChartTimestamp(
+              c.time,
+              timeframe,
+              timezone,
+              instrument.exchange,
+              'badge'
+            );
+            ctx.save();
+            ctx.font = '600 10px "IBM Plex Mono", monospace';
+            const tw = ctx.measureText(ts).width + 12;
+            const tx = Math.max(2, Math.min(plotWidth - tw, bx - tw / 2));
+            ctx.fillStyle = '#2962FF';
+            ctx.fillRect(tx, size.height - timeAxisHeight + 1, tw, timeAxisHeight - 3);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(ts, tx + tw / 2, size.height - timeAxisHeight / 2);
+            ctx.restore();
+          });
+        }
+      }
+    }
+
     // Crosshair & Magnet Indicator
     if (
       crosshairEnabled &&
@@ -2236,11 +2355,13 @@ export function TradingChartCanvas({
       const idx = xToIndex(hoverPos.x);
       const hc = displayCandles[idx];
       if (hc) {
-        const d = new Date(hc.time * 1000);
-        const ts =
-          timeframe === '1D' || timeframe === '1W'
-            ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
-            : d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour12: false, hour: '2-digit', minute: '2-digit' });
+        const ts = formatChartTimestamp(
+          hc.time,
+          timeframe,
+          timezone,
+          instrument.exchange,
+          'crosshair'
+        );
         const tw = ctx.measureText(ts).width + 14;
         const tx = Math.max(2, Math.min(plotWidth - tw, cx - tw / 2));
         ctx.fillStyle = palette.crosshairBadgeBg;
@@ -2279,7 +2400,9 @@ export function TradingChartCanvas({
     theme,
     chartStyle,
     timeframe,
+    timezone,
     instrument.decimals,
+    instrument.exchange,
     instrument.symbol,
     plotWidth,
     mainPaneHeight,
@@ -2943,17 +3066,21 @@ export function TradingChartCanvas({
       {inspectedPositionDrawing &&
         inspectedPositionData &&
         inspectedPositionMetrics &&
-        hoverPos && (
+        hoverPos && (() => {
+          const boxRightX = Math.max(
+            indexToX(inspectedPositionData.startIndex) + 52,
+            indexToX(inspectedPositionData.endIndex)
+          );
+          const boxLeftX = indexToX(inspectedPositionData.startIndex);
+          const placeRight = boxRightX + 240 < plotWidth;
+          const cardLeft = placeRight
+            ? Math.max(8, boxRightX + 14)
+            : Math.max(8, Math.min(plotWidth - 232, boxLeftX - 234));
+          return (
           <div
             style={{
-              left: Math.max(
-                8,
-                Math.min(
-                  size.width - 236,
-                  hoverPos.x > size.width * 0.65 ? hoverPos.x - 232 : hoverPos.x + 16
-                )
-              ),
-              top: Math.max(40, Math.min(size.height - 175, hoverPos.y + 12)),
+              left: cardLeft,
+              top: Math.max(40, Math.min(size.height - 175, hoverPos.y - 30)),
             }}
             className="pointer-events-none absolute z-20 w-56 p-2.5 rounded-md bg-[var(--bg-surface)]/96 backdrop-blur-[2px] border border-[var(--border-strong)] shadow-xl text-[11px]"
           >
@@ -3010,7 +3137,8 @@ export function TradingChartCanvas({
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
 
       {/* Inline Text / Note / Callout Draft */}
       {textDraft && (

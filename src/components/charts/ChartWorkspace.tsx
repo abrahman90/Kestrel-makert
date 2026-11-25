@@ -4,8 +4,10 @@ import {
   BellPlus,
   Bookmark,
   CandlestickChart,
+  Check,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Crosshair,
   GitCompare,
   Maximize,
@@ -43,6 +45,11 @@ import {
   Timeframe,
 } from '../../types/market';
 import { formatPrice } from '../../utils/indicators';
+import {
+  CHART_TIMEZONE_OPTIONS,
+  formatLiveClockInTimezone,
+  mapLegacyTimezoneToId,
+} from '../../utils/timezone';
 import { Button, Modal, PriceChangeText, Select, SignalLabel } from '../ui/DesignSystem';
 import {
   DrawingContextualToolbar,
@@ -56,6 +63,7 @@ import { ChartVisualSettings, NavCommand, TradingChartCanvas } from './TradingCh
 
 const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M'];
 const TEMPLATES_STORAGE_KEY = 'kestrel_drawing_templates_v1';
+const TIMEZONE_STORAGE_KEY = 'kestrel_chart_timezone_v1';
 
 function loadInitialTemplates(): DrawingTemplate[] {
   try {
@@ -189,10 +197,12 @@ export function ChartWorkspace() {
     openCreateAlertModal,
     setIsSearchModalOpen,
     openTechnicalAnalysis,
+    settings,
     pushToast,
   } = usePlatform();
 
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const timezoneMenuRef = useRef<HTMLDivElement>(null);
 
   const instrument = useMemo(
     () => instruments.find((i) => i.symbol === selectedSymbol) ?? instruments[0],
@@ -247,6 +257,49 @@ export function ChartWorkspace() {
     showVolume: true,
     logScale: false,
   });
+
+  const [chartTimezone, setChartTimezone] = useState<string>(() => {
+    try {
+      const saved = window.localStorage.getItem(TIMEZONE_STORAGE_KEY);
+      if (saved) return saved;
+    } catch {
+      // ignore storage errors
+    }
+    return mapLegacyTimezoneToId(settings.timezone);
+  });
+  const [timezoneMenuOpen, setTimezoneMenuOpen] = useState(false);
+  const [nowDate, setNowDate] = useState<Date>(() => new Date());
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowDate(new Date()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TIMEZONE_STORAGE_KEY, chartTimezone);
+    } catch {
+      // ignore storage errors
+    }
+  }, [chartTimezone]);
+
+  useEffect(() => {
+    if (!timezoneMenuOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (timezoneMenuRef.current && !timezoneMenuRef.current.contains(e.target as Node)) {
+        setTimezoneMenuOpen(false);
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTimezoneMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handleOutside);
+    window.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      window.removeEventListener('keydown', handleEsc);
+    };
+  }, [timezoneMenuOpen]);
 
   useEffect(() => {
     try {
@@ -1002,6 +1055,7 @@ export function ChartWorkspace() {
               instrument={instrument}
               candles={candles}
               timeframe={timeframe}
+              timezone={chartTimezone}
               chartStyle={chartStyle}
               indicators={indicators}
               compareInstrument={compareInstrument}
@@ -1114,14 +1168,75 @@ export function ChartWorkspace() {
                   </>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={() => setBottomPanelOpen((o) => !o)}
-                className="flex items-center gap-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer shrink-0 ml-2"
-              >
-                {bottomPanelOpen ? <PanelBottomClose className="w-3.5 h-3.5" /> : <PanelBottomOpen className="w-3.5 h-3.5" />}
-                <span className="hidden sm:inline">{bottomPanelOpen ? 'Minimize' : 'Details'}</span>
-              </button>
+              <div className="flex items-center gap-2 shrink-0 ml-2">
+                {/* Chart Timezone Clock & Selector */}
+                <div ref={timezoneMenuRef} className="relative">
+                  {(() => {
+                    const { timeText, offsetLabel } = formatLiveClockInTimezone(
+                      nowDate,
+                      chartTimezone,
+                      instrument.exchange
+                    );
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => setTimezoneMenuOpen((o) => !o)}
+                        title="Change Chart Timezone"
+                        className={`h-5 px-2 flex items-center gap-1.5 rounded font-mono tabular-nums text-[11px] transition-colors cursor-pointer whitespace-nowrap ${
+                          timezoneMenuOpen
+                            ? 'bg-[#2962FF]/15 text-[#2962FF]'
+                            : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)]'
+                        }`}
+                      >
+                        <Clock className="w-3 h-3 opacity-80" />
+                        <span>
+                          {timeText} {offsetLabel}
+                        </span>
+                      </button>
+                    );
+                  })()}
+
+                  {timezoneMenuOpen && (
+                    <div className="absolute bottom-7 right-0 z-50 w-64 max-h-80 overflow-y-auto py-1 rounded-md bg-[var(--bg-surface)] border border-[var(--border-strong)] shadow-2xl">
+                      <div className="px-3 py-1.5 text-[10px] font-semibold tracking-wider uppercase text-[var(--text-muted)] border-b border-[var(--border-subtle)]">
+                        Chart Timezone
+                      </div>
+                      {CHART_TIMEZONE_OPTIONS.map((tz) => {
+                        const isSelected = chartTimezone === tz.id;
+                        return (
+                          <button
+                            key={tz.id}
+                            type="button"
+                            onClick={() => {
+                              setChartTimezone(tz.id);
+                              setTimezoneMenuOpen(false);
+                            }}
+                            className={`w-full px-3 py-1.5 flex items-center justify-between gap-2 text-left text-xs transition-colors cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#2962FF]/12 text-[#2962FF] font-medium'
+                                : 'text-[var(--text-primary)] hover:bg-[var(--bg-panel)]'
+                            }`}
+                          >
+                            <span className="truncate">{tz.displayLabel}</span>
+                            {isSelected && <Check className="w-3.5 h-3.5 shrink-0 text-[#2962FF]" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="w-px h-3.5 bg-[var(--border-subtle)]" />
+
+                <button
+                  type="button"
+                  onClick={() => setBottomPanelOpen((o) => !o)}
+                  className="flex items-center gap-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
+                >
+                  {bottomPanelOpen ? <PanelBottomClose className="w-3.5 h-3.5" /> : <PanelBottomOpen className="w-3.5 h-3.5" />}
+                  <span className="hidden sm:inline">{bottomPanelOpen ? 'Minimize' : 'Details'}</span>
+                </button>
+              </div>
             </div>
 
             {bottomPanelOpen && displayBar && (
