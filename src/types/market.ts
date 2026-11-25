@@ -8,9 +8,12 @@ export type NavSection =
   | 'watchlists'
   | 'technical'
   | 'alerts'
+  | 'portfolio'
+  | 'trading'
   | 'news'
   | 'calendar'
-  | 'portfolio'
+  | 'reports'
+  | 'admin'
   | 'settings';
 
 export type Timeframe = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1D' | '1W' | '1M';
@@ -236,11 +239,30 @@ export interface Instrument {
   sparkline: number[];
 }
 
+export type IndicatorId =
+  | 'volume'
+  | 'ema20'
+  | 'ema50'
+  | 'sma200'
+  | 'bb'
+  | 'keltner'
+  | 'ichimoku'
+  | 'vp'
+  | 'rsi'
+  | 'macd'
+  | 'stoch'
+  | 'cci'
+  | 'atr'
+  | 'obv';
+
+export type IndicatorGroup = 'Trend' | 'Momentum' | 'Volume' | 'Volatility';
+
 export interface IndicatorConfig {
-  id: 'ema20' | 'ema50' | 'sma200' | 'bb' | 'volume' | 'rsi' | 'macd';
+  id: IndicatorId;
   label: string;
   shortName: string;
   category: 'Overlay' | 'Oscillator';
+  group: IndicatorGroup;
   enabled: boolean;
   color: string;
   params: Record<string, number>;
@@ -361,3 +383,85 @@ export interface UserSettingsState {
     lastSync: string;
   }[];
 }
+
+export type OrderSide = 'Buy' | 'Sell';
+export type OrderType = 'Market' | 'Limit' | 'Stop';
+
+export interface OpenPosition {
+  id: string;
+  symbol: string;
+  side: OrderSide;
+  quantity: number;
+  entryPrice: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  leverage: number;
+  openedAt: string;
+  note?: string;
+}
+
+export interface WorkingOrder {
+  id: string;
+  symbol: string;
+  side: OrderSide;
+  type: Exclude<OrderType, 'Market'>;
+  quantity: number;
+  limitOrStopPrice: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  createdAt: string;
+  status: 'Working' | 'Cancelled';
+}
+
+export interface TradeExecution {
+  id: string;
+  symbol: string;
+  side: OrderSide;
+  type: OrderType;
+  quantity: number;
+  fillPrice: number;
+  realizedPnl?: number;
+  feeUsd: number;
+  executedAt: string;
+  status: 'Filled' | 'Closed';
+}
+
+export type AuthView = 'login' | 'register' | 'forgot' | 'reset' | 'verify';
+
+export type AdminUserRole = 'Admin' | 'Risk Officer' | 'Senior Analyst' | 'Trader';
+export type AdminUserStatus = 'Active' | 'Suspended' | 'Pending KYC';
+
+export interface AdminUserAccount {
+  id: string;
+  fullName: string;
+  email: string;
+  role: AdminUserRole;
+  tier: 'Institutional' | 'Pro' | 'Standard';
+  equityUsd: number;
+  maxLeverage: number;
+  twoFactorEnabled: boolean;
+  status: AdminUserStatus;
+  lastActive: string;
+}
+
+export interface AdminRiskConfig {
+  maxFxLeverage: number;
+  maxCryptoLeverage: number;
+  maxEquityLeverage: number;
+  marginCallPct: number;
+  stopOutPct: number;
+  commissionBps: number;
+  orderRoutingEnabled: boolean;
+  maintenanceBanner: boolean;
+}
+
+export interface AdminAuditEntry {
+  id: string;
+  timestamp: string;
+  actor: string;
+  action: string;
+  target: string;
+  category: 'Access' | 'Risk' | 'Feed' | 'System';
+  details: string;
+}
+

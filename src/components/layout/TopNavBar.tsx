@@ -1,12 +1,18 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
+  ArrowLeftRight,
   Bell,
+  FileBarChart2,
+  HelpCircle,
+  LogOut,
   Menu,
   Moon,
   Search,
   Settings,
+  Shield,
   Sun,
   TrendingUp,
+  UserCheck,
   ChevronDown,
 } from 'lucide-react';
 import { usePlatform } from '../../context/PlatformContext';
@@ -19,7 +25,7 @@ const QUICK_NAV: { id: NavSection; label: string }[] = [
   { id: 'charts', label: 'Charts' },
   { id: 'screener', label: 'Screener' },
   { id: 'watchlists', label: 'Watchlists' },
-  { id: 'calendar', label: 'Calendar' },
+  { id: 'trading', label: 'Trading' },
 ];
 
 export function TopNavBar({ onToggleMobileNav }: { onToggleMobileNav: () => void }) {
@@ -31,11 +37,14 @@ export function TopNavBar({ onToggleMobileNav }: { onToggleMobileNav: () => void
     globalCategory,
     setGlobalCategory,
     setIsSearchModalOpen,
+    setHelpModalOpen,
     alerts,
     unreadNotifications,
     markNotificationsRead,
     settings,
     openChart,
+    openAuthModal,
+    signOut,
   } = usePlatform();
 
   const [notifOpen, setNotifOpen] = useState(false);
@@ -159,8 +168,16 @@ export function TopNavBar({ onToggleMobileNav }: { onToggleMobileNav: () => void
         </div>
       </div>
 
-      {/* Right Zone: Notifications, Theme Toggle, Settings, Profile */}
+      {/* Right Zone: Market Status, Notifications, Help, Theme Toggle, Settings, Profile */}
       <div className="flex items-center gap-1.5 shrink-0">
+        <div
+          className="hidden lg:flex items-center gap-1.5 px-2 py-1 mr-1 text-[11px] font-medium text-[var(--text-secondary)] whitespace-nowrap"
+          title="Live multi-asset demonstration market feed"
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-[#089981]" />
+          <span>Markets: {settings.liveTickSimulation ? 'Live' : 'Static'}</span>
+        </div>
+
         {/* Notifications Popover */}
         <div className="relative" ref={notifRef}>
           <button
@@ -232,6 +249,17 @@ export function TopNavBar({ onToggleMobileNav }: { onToggleMobileNav: () => void
           )}
         </div>
 
+        {/* Help Shortcut */}
+        <button
+          type="button"
+          onClick={() => setHelpModalOpen(true)}
+          aria-label="Help & Shortcuts"
+          title="Help & Keyboard Shortcuts (?)"
+          className="p-2 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)] transition-colors cursor-pointer"
+        >
+          <HelpCircle className="w-4 h-4" />
+        </button>
+
         {/* Theme Selector */}
         <button
           type="button"
@@ -302,6 +330,17 @@ export function TopNavBar({ onToggleMobileNav }: { onToggleMobileNav: () => void
                   type="button"
                   onClick={() => {
                     setProfileOpen(false);
+                    setActiveScreen('trading');
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-panel)] rounded cursor-pointer"
+                >
+                  <ArrowLeftRight className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>Trading Desk</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileOpen(false);
                     setActiveScreen('portfolio');
                   }}
                   className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-panel)] rounded cursor-pointer"
@@ -313,12 +352,57 @@ export function TopNavBar({ onToggleMobileNav }: { onToggleMobileNav: () => void
                   type="button"
                   onClick={() => {
                     setProfileOpen(false);
+                    setActiveScreen('reports');
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-panel)] rounded cursor-pointer"
+                >
+                  <FileBarChart2 className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>Performance Reports</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    setActiveScreen('admin');
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-panel)] rounded cursor-pointer"
+                >
+                  <Shield className="w-3.5 h-3.5 text-[#2962FF]" />
+                  <span>Admin Console</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileOpen(false);
                     setActiveScreen('settings');
                   }}
                   className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-panel)] rounded cursor-pointer"
                 >
                   <Settings className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                   <span>Account & Preferences</span>
+                </button>
+                <div className="my-1 border-t border-[var(--border-subtle)]" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    openAuthModal('login');
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--text-primary)] hover:bg-[var(--bg-panel)] rounded cursor-pointer"
+                >
+                  <UserCheck className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  <span>Switch / Verify Account</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    signOut();
+                  }}
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-[#F23645] hover:bg-[#F23645]/10 rounded cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Sign Out</span>
                 </button>
               </div>
             </div>

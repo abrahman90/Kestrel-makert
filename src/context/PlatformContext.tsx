@@ -1,36 +1,63 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
+  INITIAL_ADMIN_AUDIT_LOGS,
+  INITIAL_ADMIN_RISK_CONFIG,
+  INITIAL_ADMIN_USERS,
   INITIAL_ALERTS,
   INITIAL_ECONOMIC_EVENTS,
   INITIAL_HOLDINGS,
   INITIAL_INSTRUMENTS,
   INITIAL_NEWS,
+  INITIAL_OPEN_POSITIONS,
   INITIAL_SCREENER_PRESETS,
+  INITIAL_TRADE_HISTORY,
   INITIAL_TRANSACTIONS,
   INITIAL_USER_SETTINGS,
   INITIAL_WATCHLISTS,
+  INITIAL_WORKING_ORDERS,
 } from '../data/mockMarketData';
 import {
+  AdminAuditEntry,
+  AdminRiskConfig,
+  AdminUserAccount,
+  AdminUserRole,
+  AdminUserStatus,
   AlertCondition,
+  AuthView,
   EconomicEvent,
   Instrument,
   MarketCategory,
   NavSection,
   NewsArticle,
+  OpenPosition,
+  OrderSide,
+  OrderType,
   PortfolioHolding,
   PortfolioTransaction,
   PriceAlert,
   ScreenerPreset,
   Timeframe,
+  TradeExecution,
   UserSettingsState,
   WatchlistGroup,
+  WorkingOrder,
 } from '../types/market';
+import { mapLegacyTimezoneToId } from '../utils/timezone';
 
 export interface ToastMessage {
   id: string;
   title: string;
   description?: string;
   variant: 'info' | 'success' | 'warning' | 'error';
+}
+
+export interface TradingAccountSummary {
+  balance: number;
+  equity: number;
+  usedMargin: number;
+  freeMargin: number;
+  unrealizedPnl: number;
+  marginLevelPct: number;
 }
 
 interface PlatformContextValue {
@@ -48,13 +75,17 @@ interface PlatformContextValue {
   openTechnicalAnalysis: (symbol: string) => void;
   timeframe: Timeframe;
   setTimeframe: (tf: Timeframe) => void;
+  chartTimezone: string;
+  setChartTimezone: (tzId: string) => void;
   watchlists: WatchlistGroup[];
   activeWatchlistId: string;
   setActiveWatchlistId: (id: string) => void;
   createWatchlist: (name: string) => void;
+  renameWatchlist: (id: string, name: string) => void;
   deleteWatchlist: (id: string) => void;
   addSymbolToWatchlist: (watchlistId: string, symbol: string) => void;
   removeSymbolFromWatchlist: (watchlistId: string, symbol: string) => void;
+  reorderWatchlistSymbol: (watchlistId: string, symbol: string, direction: 'up' | 'down') => void;
   alerts: PriceAlert[];
   createAlert: (payload: {
     symbol: string;
@@ -77,6 +108,23 @@ interface PlatformContextValue {
     quantity: number;
     price: number;
   }) => void;
+  openPositions: OpenPosition[];
+  workingOrders: WorkingOrder[];
+  tradeHistory: TradeExecution[];
+  accountSummary: TradingAccountSummary;
+  placeOrder: (payload: {
+    symbol: string;
+    side: OrderSide;
+    type: OrderType;
+    quantity: number;
+    limitOrStopPrice?: number;
+    stopLoss?: number;
+    takeProfit?: number;
+    leverage?: number;
+    note?: string;
+  }) => void;
+  closePosition: (positionId: string) => void;
+  cancelOrder: (orderId: string) => void;
   screenerPresets: ScreenerPreset[];
   saveScreenerPreset: (preset: Omit<ScreenerPreset, 'id'>) => void;
   deleteScreenerPreset: (id: string) => void;
@@ -85,17 +133,61 @@ interface PlatformContextValue {
   toggleConnectedAccount: (id: string) => void;
   isSearchModalOpen: boolean;
   setIsSearchModalOpen: (open: boolean) => void;
+  helpModalOpen: boolean;
+  setHelpModalOpen: (open: boolean) => void;
   alertModalSymbol: string | null;
   openCreateAlertModal: (symbol?: string) => void;
   closeCreateAlertModal: () => void;
+  isAuthenticated: boolean;
+  authModalOpen: boolean;
+  authView: AuthView;
+  openAuthModal: (view?: AuthView) => void;
+  closeAuthModal: () => void;
+  completeAuth: (user?: { fullName?: string; email?: string }) => void;
+  signOut: () => void;
   toasts: ToastMessage[];
   pushToast: (toast: Omit<ToastMessage, 'id'>) => void;
   dismissToast: (id: string) => void;
   unreadNotifications: number;
   markNotificationsRead: () => void;
+  adminUsers: AdminUserAccount[];
+  adminRiskConfig: AdminRiskConfig;
+  adminAuditLogs: AdminAuditEntry[];
+  addAdminUser: (payload: {
+    fullName: string;
+    email: string;
+    role: AdminUserRole;
+    tier: 'Institutional' | 'Pro' | 'Standard';
+    equityUsd: number;
+    maxLeverage: number;
+  }) => void;
+  updateAdminUserRole: (userId: string, role: AdminUserRole) => void;
+  updateAdminUserStatus: (userId: string, status: AdminUserStatus) => void;
+  updateAdminUserLeverage: (userId: string, maxLeverage: number) => void;
+  updateAdminRiskConfig: (partial: Partial<AdminRiskConfig>) => void;
+  updateInstrumentStatus: (symbol: string, status: Instrument['status']) => void;
+  appendAdminAuditLog: (entry: Omit<AdminAuditEntry, 'id' | 'timestamp'>) => void;
 }
 
+const TIMEZONE_STORAGE_KEY = 'kestrel_chart_timezone_v1';
+
 const PlatformContext = createContext<PlatformContextValue | null>(null);
+
+export function computePositionUnrealizedPnl(pos: OpenPosition, currentPrice: number): number {
+  const diff = pos.side === 'Buy' ? currentPrice - pos.entryPrice : pos.entryPrice - currentPrice;
+  // Normalize FX JPY pairs approximately in USD
+  if (pos.symbol.endsWith('/JPY')) {
+    return (diff * pos.quantity) / Math.max(1, currentPrice);
+  }
+  return diff * pos.quantity;
+}
+
+export function computePositionNotionalUsd(pos: OpenPosition, currentPrice: number): number {
+  if (pos.symbol.endsWith('/JPY')) {
+    return pos.quantity;
+  }
+  return pos.quantity * currentPrice;
+}
 
 export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<'dark' | 'light'>('dark');
@@ -111,12 +203,33 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [economicEvents] = useState<EconomicEvent[]>(INITIAL_ECONOMIC_EVENTS);
   const [holdings, setHoldings] = useState<PortfolioHolding[]>(INITIAL_HOLDINGS);
   const [transactions, setTransactions] = useState<PortfolioTransaction[]>(INITIAL_TRANSACTIONS);
+  const [openPositions, setOpenPositions] = useState<OpenPosition[]>(INITIAL_OPEN_POSITIONS);
+  const [workingOrders, setWorkingOrders] = useState<WorkingOrder[]>(INITIAL_WORKING_ORDERS);
+  const [tradeHistory, setTradeHistory] = useState<TradeExecution[]>(INITIAL_TRADE_HISTORY);
+  const [accountBalance, setAccountBalance] = useState<number>(250000);
   const [screenerPresets, setScreenerPresets] = useState<ScreenerPreset[]>(INITIAL_SCREENER_PRESETS);
   const [settings, setSettings] = useState<UserSettingsState>(INITIAL_USER_SETTINGS);
+  const [chartTimezone, setChartTimezoneState] = useState<string>(() => {
+    try {
+      const saved = window.localStorage.getItem(TIMEZONE_STORAGE_KEY);
+      if (saved) return saved;
+    } catch {
+      // ignore storage errors
+    }
+    return mapLegacyTimezoneToId(INITIAL_USER_SETTINGS.timezone);
+  });
+
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
+  const [helpModalOpen, setHelpModalOpen] = useState(false);
   const [alertModalSymbol, setAlertModalSymbol] = useState<string | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(true);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authView, setAuthView] = useState<AuthView>('login');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [unreadNotifications, setUnreadNotifications] = useState<number>(2);
+  const [adminUsers, setAdminUsers] = useState<AdminUserAccount[]>(INITIAL_ADMIN_USERS);
+  const [adminRiskConfig, setAdminRiskConfig] = useState<AdminRiskConfig>(INITIAL_ADMIN_RISK_CONFIG);
+  const [adminAuditLogs, setAdminAuditLogs] = useState<AdminAuditEntry[]>(INITIAL_ADMIN_AUDIT_LOGS);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -126,6 +239,15 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       root.classList.remove('dark');
     }
   }, [theme]);
+
+  const setChartTimezone = useCallback((tzId: string) => {
+    setChartTimezoneState(tzId);
+    try {
+      window.localStorage.setItem(TIMEZONE_STORAGE_KEY, tzId);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
 
   const setTheme = useCallback((next: 'dark' | 'light') => {
     setThemeState(next);
@@ -147,27 +269,28 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Keyboard shortcuts: Cmd/Ctrl + K or '/' opens global search
+  // Keyboard shortcuts: Cmd/Ctrl + K or '/' opens global search, '?' opens help
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const tag = document.activeElement?.tagName;
+      const inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setIsSearchModalOpen((prev) => !prev);
-      } else if (
-        e.key === '/' &&
-        document.activeElement?.tagName !== 'INPUT' &&
-        document.activeElement?.tagName !== 'TEXTAREA' &&
-        document.activeElement?.tagName !== 'SELECT'
-      ) {
+      } else if (e.key === '/' && !inInput) {
         e.preventDefault();
         setIsSearchModalOpen(true);
+      } else if (e.key === '?' && !inInput) {
+        e.preventDefault();
+        setHelpModalOpen((prev) => !prev);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Realistic simulated live market ticks & alert evaluation
+  // Realistic simulated live market ticks
   useEffect(() => {
     if (!settings.liveTickSimulation) return;
     const interval = setInterval(() => {
@@ -244,6 +367,29 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     });
   }, [instruments, pushToast]);
 
+  const accountSummary = useMemo<TradingAccountSummary>(() => {
+    const priceMap = new Map(instruments.map((i) => [i.symbol, i.price]));
+    let unrealizedPnl = 0;
+    let usedMargin = 0;
+    openPositions.forEach((pos) => {
+      const px = priceMap.get(pos.symbol) ?? pos.entryPrice;
+      unrealizedPnl += computePositionUnrealizedPnl(pos, px);
+      const notional = computePositionNotionalUsd(pos, px);
+      usedMargin += notional / Math.max(1, pos.leverage);
+    });
+    const equity = accountBalance + unrealizedPnl;
+    const freeMargin = Math.max(0, equity - usedMargin);
+    const marginLevelPct = usedMargin > 0 ? (equity / usedMargin) * 100 : 999;
+    return {
+      balance: accountBalance,
+      equity,
+      usedMargin,
+      freeMargin,
+      unrealizedPnl,
+      marginLevelPct,
+    };
+  }, [accountBalance, instruments, openPositions]);
+
   const openChart = useCallback((symbol: string) => {
     setSelectedSymbol(symbol);
     setActiveScreen('charts');
@@ -262,6 +408,16 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       setWatchlists((prev) => [...prev, { id, name: trimmed, symbols: [] }]);
       setActiveWatchlistId(id);
       pushToast({ title: 'Watchlist created', description: trimmed, variant: 'success' });
+    },
+    [pushToast]
+  );
+
+  const renameWatchlist = useCallback(
+    (id: string, name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      setWatchlists((prev) => prev.map((w) => (w.id === id ? { ...w, name: trimmed } : w)));
+      pushToast({ title: 'Watchlist renamed', description: trimmed, variant: 'info' });
     },
     [pushToast]
   );
@@ -299,6 +455,25 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       prev.map((w) => (w.id === watchlistId ? { ...w, symbols: w.symbols.filter((s) => s !== symbol) } : w))
     );
   }, []);
+
+  const reorderWatchlistSymbol = useCallback(
+    (watchlistId: string, symbol: string, direction: 'up' | 'down') => {
+      setWatchlists((prev) =>
+        prev.map((w) => {
+          if (w.id !== watchlistId) return w;
+          const idx = w.symbols.indexOf(symbol);
+          if (idx === -1) return w;
+          const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+          if (targetIdx < 0 || targetIdx >= w.symbols.length) return w;
+          const next = [...w.symbols];
+          const [item] = next.splice(idx, 1);
+          next.splice(targetIdx, 0, item);
+          return { ...w, symbols: next };
+        })
+      );
+    },
+    []
+  );
 
   const createAlert = useCallback(
     (payload: {
@@ -412,6 +587,140 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     [pushToast]
   );
 
+  const placeOrder = useCallback(
+    (payload: {
+      symbol: string;
+      side: OrderSide;
+      type: OrderType;
+      quantity: number;
+      limitOrStopPrice?: number;
+      stopLoss?: number;
+      takeProfit?: number;
+      leverage?: number;
+      note?: string;
+    }) => {
+      const inst = instruments.find((i) => i.symbol === payload.symbol);
+      if (!inst || payload.quantity <= 0) return;
+
+      const stamp = '2026-11-25 ' + new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+      const lev = payload.leverage ?? (inst.category === 'Forex' ? 20 : inst.category === 'Crypto' ? 3 : 5);
+
+      if (payload.type === 'Market') {
+        const fillPrice = payload.side === 'Buy' ? inst.ask : inst.bid;
+        const notional = computePositionNotionalUsd(
+          {
+            id: 'tmp',
+            symbol: payload.symbol,
+            side: payload.side,
+            quantity: payload.quantity,
+            entryPrice: fillPrice,
+            leverage: lev,
+            openedAt: stamp,
+          },
+          fillPrice
+        );
+        const feeUsd = Number(Math.max(1.2, notional * 0.0003).toFixed(2));
+        const newPos: OpenPosition = {
+          id: `pos-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          symbol: payload.symbol,
+          side: payload.side,
+          quantity: payload.quantity,
+          entryPrice: fillPrice,
+          stopLoss: payload.stopLoss,
+          takeProfit: payload.takeProfit,
+          leverage: lev,
+          openedAt: stamp,
+          note: payload.note,
+        };
+        const exec: TradeExecution = {
+          id: `trd-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          symbol: payload.symbol,
+          side: payload.side,
+          type: 'Market',
+          quantity: payload.quantity,
+          fillPrice,
+          feeUsd,
+          executedAt: stamp,
+          status: 'Filled',
+        };
+        setOpenPositions((prev) => [newPos, ...prev]);
+        setTradeHistory((prev) => [exec, ...prev]);
+        setAccountBalance((b) => b - feeUsd);
+        pushToast({
+          title: `Market ${payload.side} Filled`,
+          description: `${payload.quantity} ${payload.symbol} @ ${fillPrice}`,
+          variant: 'success',
+        });
+      } else {
+        const targetPx = payload.limitOrStopPrice ?? inst.price;
+        const order: WorkingOrder = {
+          id: `ord-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          symbol: payload.symbol,
+          side: payload.side,
+          type: payload.type,
+          quantity: payload.quantity,
+          limitOrStopPrice: targetPx,
+          stopLoss: payload.stopLoss,
+          takeProfit: payload.takeProfit,
+          createdAt: stamp,
+          status: 'Working',
+        };
+        setWorkingOrders((prev) => [order, ...prev]);
+        pushToast({
+          title: `${payload.type} ${payload.side} Placed`,
+          description: `${payload.quantity} ${payload.symbol} @ ${targetPx}`,
+          variant: 'info',
+        });
+      }
+    },
+    [instruments, pushToast]
+  );
+
+  const closePosition = useCallback(
+    (positionId: string) => {
+      const target = openPositions.find((p) => p.id === positionId);
+      if (!target) return;
+      const inst = instruments.find((i) => i.symbol === target.symbol);
+      const exitPrice = inst ? (target.side === 'Buy' ? inst.bid : inst.ask) : target.entryPrice;
+      const pnl = Number(computePositionUnrealizedPnl(target, exitPrice).toFixed(2));
+      const notional = computePositionNotionalUsd(target, exitPrice);
+      const feeUsd = Number(Math.max(1.2, notional * 0.0003).toFixed(2));
+      const stamp = '2026-11-25 ' + new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+
+      setOpenPositions((prev) => prev.filter((p) => p.id !== positionId));
+      setAccountBalance((b) => b + pnl - feeUsd);
+      setTradeHistory((prev) => [
+        {
+          id: `trd-${Date.now()}`,
+          symbol: target.symbol,
+          side: target.side,
+          type: 'Market',
+          quantity: target.quantity,
+          fillPrice: exitPrice,
+          realizedPnl: pnl,
+          feeUsd,
+          executedAt: stamp,
+          status: 'Closed',
+        },
+        ...prev,
+      ]);
+      pushToast({
+        title: `Position Closed: ${target.symbol}`,
+        description: `Realized P&L: ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`,
+        variant: pnl >= 0 ? 'success' : 'warning',
+      });
+    },
+    [openPositions, instruments, pushToast]
+  );
+
+  const cancelOrder = useCallback(
+    (orderId: string) => {
+      setWorkingOrders((prev) => prev.filter((o) => o.id !== orderId));
+      pushToast({ title: 'Working order cancelled', variant: 'info' });
+    },
+    [pushToast]
+  );
+
   const saveScreenerPreset = useCallback(
     (preset: Omit<ScreenerPreset, 'id'>) => {
       const next: ScreenerPreset = { ...preset, id: `sp-${Date.now()}` };
@@ -459,9 +768,183 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     setAlertModalSymbol(null);
   }, []);
 
+  const openAuthModal = useCallback((view: AuthView = 'login') => {
+    setAuthView(view);
+    setAuthModalOpen(true);
+  }, []);
+
+  const closeAuthModal = useCallback(() => {
+    setAuthModalOpen(false);
+  }, []);
+
+  const completeAuth = useCallback(
+    (user?: { fullName?: string; email?: string }) => {
+      if (user?.fullName || user?.email) {
+        setSettings((prev) => ({
+          ...prev,
+          ...(user.fullName ? { fullName: user.fullName } : {}),
+          ...(user.email ? { email: user.email } : {}),
+        }));
+      }
+      setIsAuthenticated(true);
+      setAuthModalOpen(false);
+      pushToast({
+        title: 'Authenticated to KESTREL',
+        description: user?.email ?? settings.email,
+        variant: 'success',
+      });
+    },
+    [pushToast, settings.email]
+  );
+
+  const signOut = useCallback(() => {
+    setIsAuthenticated(false);
+    setAuthView('login');
+    setAuthModalOpen(true);
+  }, []);
+
   const markNotificationsRead = useCallback(() => {
     setUnreadNotifications(0);
   }, []);
+
+  const appendAdminAuditLog = useCallback(
+    (entry: Omit<AdminAuditEntry, 'id' | 'timestamp'>) => {
+      const stamp =
+        '2026-11-25 ' +
+        new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+      setAdminAuditLogs((prev) => [
+        {
+          id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          timestamp: stamp,
+          ...entry,
+        },
+        ...prev,
+      ]);
+    },
+    []
+  );
+
+  const addAdminUser = useCallback(
+    (payload: {
+      fullName: string;
+      email: string;
+      role: AdminUserRole;
+      tier: 'Institutional' | 'Pro' | 'Standard';
+      equityUsd: number;
+      maxLeverage: number;
+    }) => {
+      const next: AdminUserAccount = {
+        id: `adm-u-${Date.now()}`,
+        fullName: payload.fullName.trim(),
+        email: payload.email.trim(),
+        role: payload.role,
+        tier: payload.tier,
+        equityUsd: payload.equityUsd,
+        maxLeverage: payload.maxLeverage,
+        twoFactorEnabled: true,
+        status: 'Active',
+        lastActive: 'Provisioned now',
+      };
+      setAdminUsers((prev) => [next, ...prev]);
+      appendAdminAuditLog({
+        actor: settings.fullName,
+        action: 'Account Provisioned',
+        target: next.email,
+        category: 'Access',
+        details: `Created ${next.role} account (${next.tier}) with ${next.maxLeverage}x leverage cap.`,
+      });
+      pushToast({ title: 'User Account Provisioned', description: next.email, variant: 'success' });
+    },
+    [appendAdminAuditLog, pushToast, settings.fullName]
+  );
+
+  const updateAdminUserRole = useCallback(
+    (userId: string, role: AdminUserRole) => {
+      setAdminUsers((prev) =>
+        prev.map((u) => {
+          if (u.id !== userId) return u;
+          appendAdminAuditLog({
+            actor: settings.fullName,
+            action: 'Role Updated',
+            target: u.email,
+            category: 'Access',
+            details: `Changed role from ${u.role} to ${role}.`,
+          });
+          return { ...u, role };
+        })
+      );
+    },
+    [appendAdminAuditLog, settings.fullName]
+  );
+
+  const updateAdminUserStatus = useCallback(
+    (userId: string, status: AdminUserStatus) => {
+      setAdminUsers((prev) =>
+        prev.map((u) => {
+          if (u.id !== userId) return u;
+          appendAdminAuditLog({
+            actor: settings.fullName,
+            action: `Status -> ${status}`,
+            target: u.email,
+            category: 'Access',
+            details: `Updated account status from ${u.status} to ${status}.`,
+          });
+          return { ...u, status };
+        })
+      );
+      pushToast({ title: 'Account Status Updated', description: status, variant: 'info' });
+    },
+    [appendAdminAuditLog, pushToast, settings.fullName]
+  );
+
+  const updateAdminUserLeverage = useCallback(
+    (userId: string, maxLeverage: number) => {
+      setAdminUsers((prev) =>
+        prev.map((u) => {
+          if (u.id !== userId) return u;
+          appendAdminAuditLog({
+            actor: settings.fullName,
+            action: 'Leverage Cap Updated',
+            target: u.email,
+            category: 'Risk',
+            details: `Adjusted account leverage cap to ${maxLeverage}x.`,
+          });
+          return { ...u, maxLeverage };
+        })
+      );
+    },
+    [appendAdminAuditLog, settings.fullName]
+  );
+
+  const updateAdminRiskConfig = useCallback(
+    (partial: Partial<AdminRiskConfig>) => {
+      setAdminRiskConfig((prev) => ({ ...prev, ...partial }));
+      appendAdminAuditLog({
+        actor: settings.fullName,
+        action: 'Risk Policy Updated',
+        target: 'Global Risk Policy',
+        category: 'Risk',
+        details: `Updated global parameters (${Object.keys(partial).join(', ')}).`,
+      });
+      pushToast({ title: 'Risk Policy Saved', variant: 'success' });
+    },
+    [appendAdminAuditLog, pushToast, settings.fullName]
+  );
+
+  const updateInstrumentStatus = useCallback(
+    (symbol: string, status: Instrument['status']) => {
+      setInstruments((prev) => prev.map((inst) => (inst.symbol === symbol ? { ...inst, status } : inst)));
+      appendAdminAuditLog({
+        actor: settings.fullName,
+        action: 'Market Session Override',
+        target: symbol,
+        category: 'Feed',
+        details: `Set market feed status for ${symbol} to ${status}.`,
+      });
+      pushToast({ title: `${symbol} Feed: ${status}`, variant: 'info' });
+    },
+    [appendAdminAuditLog, pushToast, settings.fullName]
+  );
 
   const value = useMemo<PlatformContextValue>(
     () => ({
@@ -479,13 +962,17 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       openTechnicalAnalysis,
       timeframe,
       setTimeframe,
+      chartTimezone,
+      setChartTimezone,
       watchlists,
       activeWatchlistId,
       setActiveWatchlistId,
       createWatchlist,
+      renameWatchlist,
       deleteWatchlist,
       addSymbolToWatchlist,
       removeSymbolFromWatchlist,
+      reorderWatchlistSymbol,
       alerts,
       createAlert,
       deleteAlert,
@@ -495,6 +982,13 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       holdings,
       transactions,
       addPortfolioTransaction,
+      openPositions,
+      workingOrders,
+      tradeHistory,
+      accountSummary,
+      placeOrder,
+      closePosition,
+      cancelOrder,
       screenerPresets,
       saveScreenerPreset,
       deleteScreenerPreset,
@@ -503,14 +997,33 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       toggleConnectedAccount,
       isSearchModalOpen,
       setIsSearchModalOpen,
+      helpModalOpen,
+      setHelpModalOpen,
       alertModalSymbol,
       openCreateAlertModal,
       closeCreateAlertModal,
+      isAuthenticated,
+      authModalOpen,
+      authView,
+      openAuthModal,
+      closeAuthModal,
+      completeAuth,
+      signOut,
       toasts,
       pushToast,
       dismissToast,
       unreadNotifications,
       markNotificationsRead,
+      adminUsers,
+      adminRiskConfig,
+      adminAuditLogs,
+      addAdminUser,
+      updateAdminUserRole,
+      updateAdminUserStatus,
+      updateAdminUserLeverage,
+      updateAdminRiskConfig,
+      updateInstrumentStatus,
+      appendAdminAuditLog,
     }),
     [
       theme,
@@ -523,12 +1036,16 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       openChart,
       openTechnicalAnalysis,
       timeframe,
+      chartTimezone,
+      setChartTimezone,
       watchlists,
       activeWatchlistId,
       createWatchlist,
+      renameWatchlist,
       deleteWatchlist,
       addSymbolToWatchlist,
       removeSymbolFromWatchlist,
+      reorderWatchlistSymbol,
       alerts,
       createAlert,
       deleteAlert,
@@ -538,6 +1055,13 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       holdings,
       transactions,
       addPortfolioTransaction,
+      openPositions,
+      workingOrders,
+      tradeHistory,
+      accountSummary,
+      placeOrder,
+      closePosition,
+      cancelOrder,
       screenerPresets,
       saveScreenerPreset,
       deleteScreenerPreset,
@@ -545,14 +1069,32 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       updateSettings,
       toggleConnectedAccount,
       isSearchModalOpen,
+      helpModalOpen,
       alertModalSymbol,
       openCreateAlertModal,
       closeCreateAlertModal,
+      isAuthenticated,
+      authModalOpen,
+      authView,
+      openAuthModal,
+      closeAuthModal,
+      completeAuth,
+      signOut,
       toasts,
       pushToast,
       dismissToast,
       unreadNotifications,
       markNotificationsRead,
+      adminUsers,
+      adminRiskConfig,
+      adminAuditLogs,
+      addAdminUser,
+      updateAdminUserRole,
+      updateAdminUserStatus,
+      updateAdminUserLeverage,
+      updateAdminRiskConfig,
+      updateInstrumentStatus,
+      appendAdminAuditLog,
     ]
   );
 

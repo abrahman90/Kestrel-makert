@@ -57,6 +57,67 @@ export function calculateBollingerBands(
   return { upper, middle, lower };
 }
 
+export function calculateKeltnerChannels(
+  candles: Candle[],
+  emaPeriod = 20,
+  atrPeriod = 10,
+  mult = 2
+): { upper: (number | null)[]; middle: (number | null)[]; lower: (number | null)[] } {
+  const closes = candles.map((c) => c.close);
+  const middle = calculateEMA(closes, emaPeriod);
+  const atr = calculateATR(candles, atrPeriod);
+  const upper: (number | null)[] = new Array(candles.length).fill(null);
+  const lower: (number | null)[] = new Array(candles.length).fill(null);
+  for (let i = 0; i < candles.length; i++) {
+    if (middle[i] !== null && atr[i] !== null) {
+      upper[i] = (middle[i] as number) + mult * (atr[i] as number);
+      lower[i] = (middle[i] as number) - mult * (atr[i] as number);
+    }
+  }
+  return { upper, middle, lower };
+}
+
+export function calculateIchimoku(
+  candles: Candle[],
+  tenkanPeriod = 9,
+  kijunPeriod = 26,
+  senkouBPeriod = 52
+): {
+  tenkan: (number | null)[];
+  kijun: (number | null)[];
+  senkouA: (number | null)[];
+  senkouB: (number | null)[];
+} {
+  const midpoint = (idx: number, period: number): number | null => {
+    if (idx < period - 1) return null;
+    let hi = -Infinity;
+    let lo = Infinity;
+    for (let j = idx - period + 1; j <= idx; j++) {
+      if (candles[j].high > hi) hi = candles[j].high;
+      if (candles[j].low < lo) lo = candles[j].low;
+    }
+    return (hi + lo) / 2;
+  };
+
+  const tenkan: (number | null)[] = candles.map((_, i) => midpoint(i, tenkanPeriod));
+  const kijun: (number | null)[] = candles.map((_, i) => midpoint(i, kijunPeriod));
+  const senkouA: (number | null)[] = new Array(candles.length).fill(null);
+  const senkouB: (number | null)[] = new Array(candles.length).fill(null);
+
+  const shift = 26;
+  for (let i = 0; i < candles.length; i++) {
+    const src = i - shift;
+    if (src >= 0 && tenkan[src] !== null && kijun[src] !== null) {
+      senkouA[i] = ((tenkan[src] as number) + (kijun[src] as number)) / 2;
+    }
+    if (src >= 0) {
+      senkouB[i] = midpoint(src, senkouBPeriod);
+    }
+  }
+
+  return { tenkan, kijun, senkouA, senkouB };
+}
+
 export function calculateRSI(values: number[], period = 14): (number | null)[] {
   const result: (number | null)[] = new Array(values.length).fill(null);
   if (values.length <= period) return result;
@@ -113,6 +174,110 @@ export function calculateMACD(
   }
 
   return { macd, signal, histogram };
+}
+
+export function calculateStochastic(
+  candles: Candle[],
+  kPeriod = 14,
+  dPeriod = 3
+): { k: (number | null)[]; d: (number | null)[] } {
+  const k: (number | null)[] = new Array(candles.length).fill(null);
+  for (let i = kPeriod - 1; i < candles.length; i++) {
+    let hi = -Infinity;
+    let lo = Infinity;
+    for (let j = i - kPeriod + 1; j <= i; j++) {
+      if (candles[j].high > hi) hi = candles[j].high;
+      if (candles[j].low < lo) lo = candles[j].low;
+    }
+    const span = hi - lo;
+    k[i] = span === 0 ? 50 : ((candles[i].close - lo) / span) * 100;
+  }
+
+  const d: (number | null)[] = new Array(candles.length).fill(null);
+  for (let i = kPeriod - 1 + dPeriod - 1; i < candles.length; i++) {
+    let sum = 0;
+    let valid = true;
+    for (let j = i - dPeriod + 1; j <= i; j++) {
+      if (k[j] === null) {
+        valid = false;
+        break;
+      }
+      sum += k[j] as number;
+    }
+    if (valid) d[i] = sum / dPeriod;
+  }
+  return { k, d };
+}
+
+export function calculateCCI(candles: Candle[], period = 20): (number | null)[] {
+  const tp = candles.map((c) => (c.high + c.low + c.close) / 3);
+  const smaTp = calculateSMA(tp, period);
+  const result: (number | null)[] = new Array(candles.length).fill(null);
+  for (let i = period - 1; i < candles.length; i++) {
+    const mean = smaTp[i];
+    if (mean === null) continue;
+    let devSum = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      devSum += Math.abs(tp[j] - mean);
+    }
+    const meanDev = devSum / period;
+    result[i] = meanDev === 0 ? 0 : (tp[i] - mean) / (0.015 * meanDev);
+  }
+  return result;
+}
+
+export function calculateOBV(candles: Candle[]): number[] {
+  const obv: number[] = [];
+  let running = 0;
+  for (let i = 0; i < candles.length; i++) {
+    if (i > 0) {
+      if (candles[i].close > candles[i - 1].close) running += candles[i].volume;
+      else if (candles[i].close < candles[i - 1].close) running -= candles[i].volume;
+    }
+    obv.push(running);
+  }
+  return obv;
+}
+
+export function calculateVolumeProfile(
+  candles: Candle[],
+  startIndex: number,
+  endIndex: number,
+  bins = 18
+): { priceLow: number; priceHigh: number; priceMid: number; volume: number; isPoc: boolean }[] {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = startIndex; i < endIndex; i++) {
+    const c = candles[i];
+    if (!c) continue;
+    if (c.low < lo) lo = c.low;
+    if (c.high > hi) hi = c.high;
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return [];
+  const step = (hi - lo) / bins;
+  const buckets = new Array(bins).fill(0);
+  for (let i = startIndex; i < endIndex; i++) {
+    const c = candles[i];
+    if (!c) continue;
+    const typical = (c.high + c.low + c.close) / 3;
+    const idx = Math.max(0, Math.min(bins - 1, Math.floor((typical - lo) / step)));
+    buckets[idx] += c.volume;
+  }
+  let maxVol = -1;
+  let pocIdx = 0;
+  buckets.forEach((v, i) => {
+    if (v > maxVol) {
+      maxVol = v;
+      pocIdx = i;
+    }
+  });
+  return buckets.map((vol, i) => ({
+    priceLow: lo + i * step,
+    priceHigh: lo + (i + 1) * step,
+    priceMid: lo + (i + 0.5) * step,
+    volume: vol,
+    isPoc: i === pocIdx,
+  }));
 }
 
 export function calculateATR(candles: Candle[], period = 14): (number | null)[] {

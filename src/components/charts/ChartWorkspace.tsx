@@ -3,6 +3,7 @@ import {
   Activity,
   BellPlus,
   Bookmark,
+  Camera,
   CandlestickChart,
   Check,
   ChevronLeft,
@@ -15,17 +16,24 @@ import {
   Maximize,
   Maximize2,
   Minimize2,
+  Newspaper,
   PanelBottomClose,
   PanelBottomOpen,
   PanelRightClose,
   PanelRightOpen,
+  Redo2,
   RotateCcw,
   Search,
   Settings2,
+  Undo2,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { usePlatform } from '../../context/PlatformContext';
+import {
+  computePositionUnrealizedPnl,
+  usePlatform,
+} from '../../context/PlatformContext';
 import {
   applyTemplateConfigToDrawing,
   DEFAULT_DRAWING_TEMPLATES,
@@ -44,13 +52,15 @@ import {
   DrawingTemplateConfig,
   DrawingTool,
   IndicatorConfig,
+  IndicatorId,
+  OrderSide,
+  OrderType,
   Timeframe,
 } from '../../types/market';
 import { formatPrice } from '../../utils/indicators';
 import {
   CHART_TIMEZONE_OPTIONS,
   formatLiveClockInTimezone,
-  mapLegacyTimezoneToId,
 } from '../../utils/timezone';
 import { Button, Modal, PriceChangeText, Select, SignalLabel } from '../ui/DesignSystem';
 import {
@@ -61,11 +71,12 @@ import {
 import { DrawingObjectManager } from './DrawingObjectManager';
 import { DrawingTemplateManager } from './DrawingTemplateManager';
 import { DrawingToolbar } from './DrawingToolbar';
+import { IndicatorSelectorModal } from './IndicatorSelectorModal';
 import { ChartVisualSettings, NavCommand, TradingChartCanvas } from './TradingChartCanvas';
 
 const TIMEFRAMES: Timeframe[] = ['1m', '5m', '15m', '30m', '1h', '4h', '1D', '1W', '1M'];
 const TEMPLATES_STORAGE_KEY = 'kestrel_drawing_templates_v1';
-const TIMEZONE_STORAGE_KEY = 'kestrel_chart_timezone_v1';
+const FAV_INDICATORS_KEY = 'kestrel_favorite_indicators_v1';
 
 function loadInitialTemplates(): DrawingTemplate[] {
   try {
@@ -80,6 +91,19 @@ function loadInitialTemplates(): DrawingTemplate[] {
     // ignore storage errors
   }
   return DEFAULT_DRAWING_TEMPLATES;
+}
+
+function loadFavoriteIndicators(): IndicatorId[] {
+  try {
+    const raw = window.localStorage.getItem(FAV_INDICATORS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed as IndicatorId[];
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return ['ema20', 'ema50', 'rsi', 'macd', 'bb'];
 }
 
 function deepCloneDrawing(
@@ -126,13 +150,20 @@ function deepCloneDrawing(
 }
 
 const INITIAL_INDICATORS: IndicatorConfig[] = [
-  { id: 'volume', label: 'Volume Histogram', shortName: 'Vol', category: 'Overlay', enabled: false, color: '#089981', params: {} },
-  { id: 'ema20', label: 'Exponential Moving Average (20)', shortName: 'EMA 20', category: 'Overlay', enabled: false, color: '#F0B90B', params: { period: 20 } },
-  { id: 'ema50', label: 'Exponential Moving Average (50)', shortName: 'EMA 50', category: 'Overlay', enabled: false, color: '#2962FF', params: { period: 50 } },
-  { id: 'sma200', label: 'Long-Term Moving Average (100)', shortName: 'SMA 100', category: 'Overlay', enabled: false, color: '#AB47BC', params: { period: 100 } },
-  { id: 'bb', label: 'Bollinger Bands (20, 2)', shortName: 'BB(20,2)', category: 'Overlay', enabled: false, color: '#2962FF', params: { period: 20, mult: 2 } },
-  { id: 'rsi', label: 'Relative Strength Index (14)', shortName: 'RSI(14)', category: 'Oscillator', enabled: false, color: '#AB47BC', params: { period: 14 } },
-  { id: 'macd', label: 'MACD (12, 26, 9)', shortName: 'MACD', category: 'Oscillator', enabled: false, color: '#2962FF', params: { fast: 12, slow: 26, signal: 9 } },
+  { id: 'volume', label: 'Volume Histogram', shortName: 'Vol', category: 'Overlay', group: 'Volume', enabled: false, color: '#089981', params: {} },
+  { id: 'ema20', label: 'Exponential Moving Average (20)', shortName: 'EMA 20', category: 'Overlay', group: 'Trend', enabled: false, color: '#F0B90B', params: { period: 20 } },
+  { id: 'ema50', label: 'Exponential Moving Average (50)', shortName: 'EMA 50', category: 'Overlay', group: 'Trend', enabled: false, color: '#2962FF', params: { period: 50 } },
+  { id: 'sma200', label: 'Simple Moving Average (100)', shortName: 'SMA 100', category: 'Overlay', group: 'Trend', enabled: false, color: '#AB47BC', params: { period: 100 } },
+  { id: 'ichimoku', label: 'Ichimoku Cloud (9, 26, 52)', shortName: 'Ichimoku', category: 'Overlay', group: 'Trend', enabled: false, color: '#089981', params: { tenkan: 9, kijun: 26, senkouB: 52 } },
+  { id: 'bb', label: 'Bollinger Bands (20, 2)', shortName: 'BB(20,2)', category: 'Overlay', group: 'Volatility', enabled: false, color: '#2962FF', params: { period: 20, mult: 2 } },
+  { id: 'keltner', label: 'Keltner Channels (20, 10, 2)', shortName: 'KC(20)', category: 'Overlay', group: 'Volatility', enabled: false, color: '#26A69A', params: { period: 20, atrPeriod: 10, mult: 2 } },
+  { id: 'vp', label: 'Volume Profile (Visible Range)', shortName: 'Vol Profile', category: 'Overlay', group: 'Volume', enabled: false, color: '#2962FF', params: {} },
+  { id: 'rsi', label: 'Relative Strength Index (14)', shortName: 'RSI(14)', category: 'Oscillator', group: 'Momentum', enabled: false, color: '#AB47BC', params: { period: 14 } },
+  { id: 'macd', label: 'MACD (12, 26, 9)', shortName: 'MACD', category: 'Oscillator', group: 'Momentum', enabled: false, color: '#2962FF', params: { fast: 12, slow: 26, signal: 9 } },
+  { id: 'stoch', label: 'Stochastic Oscillator (14, 3)', shortName: 'Stoch(14,3)', category: 'Oscillator', group: 'Momentum', enabled: false, color: '#2962FF', params: { kPeriod: 14, dPeriod: 3 } },
+  { id: 'cci', label: 'Commodity Channel Index (20)', shortName: 'CCI(20)', category: 'Oscillator', group: 'Momentum', enabled: false, color: '#F0B90B', params: { period: 20 } },
+  { id: 'atr', label: 'Average True Range (14)', shortName: 'ATR(14)', category: 'Oscillator', group: 'Volatility', enabled: false, color: '#F23645', params: { period: 14 } },
+  { id: 'obv', label: 'On-Balance Volume (OBV)', shortName: 'OBV', category: 'Oscillator', group: 'Volume', enabled: false, color: '#089981', params: {} },
 ];
 
 const INITIAL_CATEGORY_TOOLS: Record<DrawingCategoryId, Exclude<DrawingTool, 'cursor'>> = {
@@ -193,18 +224,29 @@ export function ChartWorkspace() {
     setSelectedSymbol,
     timeframe,
     setTimeframe,
+    chartTimezone,
+    setChartTimezone,
     watchlists,
     activeWatchlistId,
     alerts,
+    news,
+    openPositions,
+    workingOrders,
+    tradeHistory,
+    accountSummary,
+    placeOrder,
+    closePosition,
+    cancelOrder,
     openCreateAlertModal,
     setIsSearchModalOpen,
     openTechnicalAnalysis,
-    settings,
+    setActiveScreen,
     pushToast,
   } = usePlatform();
 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const timezoneMenuRef = useRef<HTMLDivElement>(null);
+  const exportPngRef = useRef<(() => void) | null>(null);
   const lastActiveIndicatorIdsRef = useRef<IndicatorConfig['id'][]>([
     'ema20',
     'ema50',
@@ -219,6 +261,8 @@ export function ChartWorkspace() {
 
   const [chartStyle, setChartStyle] = useState<ChartStyle>('candles');
   const [indicators, setIndicators] = useState<IndicatorConfig[]>(INITIAL_INDICATORS);
+  const [favoriteIndicatorIds, setFavoriteIndicatorIds] = useState<IndicatorId[]>(loadFavoriteIndicators);
+  const [recentIndicatorIds, setRecentIndicatorIds] = useState<IndicatorId[]>(['ema20', 'rsi', 'macd', 'bb']);
   const [activeTool, setActiveTool] = useState<DrawingTool>('cursor');
   const [categoryLastTool, setCategoryLastTool] =
     useState<Record<DrawingCategoryId, Exclude<DrawingTool, 'cursor'>>>(INITIAL_CATEGORY_TOOLS);
@@ -250,7 +294,15 @@ export function ChartWorkspace() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const [rightPanelTab, setRightPanelTab] = useState<'market' | 'objects'>('market');
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
+  const [bottomTab, setBottomTab] = useState<'ohlc' | 'trade' | 'positions' | 'orders' | 'history' | 'account'>('ohlc');
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Quick Chart Trade Ticket local inputs
+  const [quickOrderType, setQuickOrderType] = useState<OrderType>('Market');
+  const [quickQty, setQuickQty] = useState('10');
+  const [quickLimitPx, setQuickLimitPx] = useState('');
+  const [quickSl, setQuickSl] = useState('');
+  const [quickTp, setQuickTp] = useState('');
 
   const [indicatorsModalOpen, setIndicatorsModalOpen] = useState(false);
   const [compareModalOpen, setCompareModalOpen] = useState(false);
@@ -266,15 +318,6 @@ export function ChartWorkspace() {
     logScale: false,
   });
 
-  const [chartTimezone, setChartTimezone] = useState<string>(() => {
-    try {
-      const saved = window.localStorage.getItem(TIMEZONE_STORAGE_KEY);
-      if (saved) return saved;
-    } catch {
-      // ignore storage errors
-    }
-    return mapLegacyTimezoneToId(settings.timezone);
-  });
   const [timezoneMenuOpen, setTimezoneMenuOpen] = useState(false);
   const [nowDate, setNowDate] = useState<Date>(() => new Date());
 
@@ -285,11 +328,11 @@ export function ChartWorkspace() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(TIMEZONE_STORAGE_KEY, chartTimezone);
+      window.localStorage.setItem(FAV_INDICATORS_KEY, JSON.stringify(favoriteIndicatorIds));
     } catch {
       // ignore storage errors
     }
-  }, [chartTimezone]);
+  }, [favoriteIndicatorIds]);
 
   useEffect(() => {
     if (!timezoneMenuOpen) return;
@@ -796,6 +839,7 @@ export function ChartWorkspace() {
   );
 
   const toggleIndicator = (id: IndicatorConfig['id']) => {
+    setRecentIndicatorIds((prev) => [id, ...prev.filter((x) => x !== id)].slice(0, 6));
     setIndicators((prev) =>
       prev.map((ind) => {
         if (ind.id !== id) return ind;
@@ -805,6 +849,43 @@ export function ChartWorkspace() {
         }
         return { ...ind, enabled: nextEnabled };
       })
+    );
+  };
+
+  const toggleFavoriteIndicator = (id: IndicatorId) => {
+    setFavoriteIndicatorIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  };
+
+  const updateIndicatorConfig = (id: IndicatorId, patch: Partial<IndicatorConfig>) => {
+    setIndicators((prev) =>
+      prev.map((ind) => {
+        if (ind.id !== id) return ind;
+        const nextParams = patch.params ?? ind.params;
+        let shortName = ind.shortName;
+        if (id === 'ema20' || id === 'ema50') shortName = `EMA ${nextParams.period ?? 20}`;
+        else if (id === 'sma200') shortName = `SMA ${nextParams.period ?? 100}`;
+        else if (id === 'bb') shortName = `BB(${nextParams.period ?? 20},${nextParams.mult ?? 2})`;
+        else if (id === 'keltner') shortName = `KC(${nextParams.period ?? 20})`;
+        else if (id === 'rsi') shortName = `RSI(${nextParams.period ?? 14})`;
+        else if (id === 'cci') shortName = `CCI(${nextParams.period ?? 20})`;
+        else if (id === 'atr') shortName = `ATR(${nextParams.period ?? 14})`;
+        else if (id === 'stoch') shortName = `Stoch(${nextParams.kPeriod ?? 14},${nextParams.dPeriod ?? 3})`;
+        return { ...ind, ...patch, shortName };
+      })
+    );
+  };
+
+  const resetIndicatorConfig = (id: IndicatorId) => {
+    const def = INITIAL_INDICATORS.find((i) => i.id === id);
+    if (!def) return;
+    setIndicators((prev) =>
+      prev.map((ind) =>
+        ind.id === id
+          ? { ...def, enabled: ind.enabled }
+          : ind
+      )
     );
   };
 
@@ -852,6 +933,39 @@ export function ChartWorkspace() {
     }
   };
 
+  const handleScreenshot = () => {
+    if (exportPngRef.current) {
+      exportPngRef.current();
+      pushToast({
+        title: 'Chart screenshot saved',
+        description: `${instrument.symbol} (${timeframe}) exported as PNG`,
+        variant: 'success',
+      });
+    }
+  };
+
+  const handleQuickOrder = (side: OrderSide) => {
+    const qty = parseFloat(quickQty);
+    if (!Number.isFinite(qty) || qty <= 0) return;
+    const limitPx = quickLimitPx ? parseFloat(quickLimitPx) : undefined;
+    const sl = quickSl ? parseFloat(quickSl) : undefined;
+    const tp = quickTp ? parseFloat(quickTp) : undefined;
+    placeOrder({
+      symbol: instrument.symbol,
+      side,
+      type: quickOrderType,
+      quantity: qty,
+      limitOrStopPrice: quickOrderType !== 'Market' ? limitPx || instrument.price : undefined,
+      stopLoss: Number.isFinite(sl) ? sl : undefined,
+      takeProfit: Number.isFinite(tp) ? tp : undefined,
+    });
+  };
+
+  const symbolNews = useMemo(() => {
+    const matched = news.filter((n) => n.relatedSymbols.includes(instrument.symbol));
+    return matched.length > 0 ? matched : news.slice(0, 2);
+  }, [news, instrument.symbol]);
+
   const displayBar = hoveredCandle ?? candles[candles.length - 1];
   const enabledIndicators = indicators.filter((i) => i.enabled);
   const activeToolDef = getDrawingToolDef(activeTool);
@@ -860,7 +974,7 @@ export function ChartWorkspace() {
     <div
       ref={workspaceRef}
       className={`flex flex-col bg-[var(--bg-canvas)] ${
-        isFullscreen ? 'fixed inset-0 z-50 h-screen' : 'h-[calc(100vh-48px)]'
+        isFullscreen ? 'fixed inset-0 z-50 h-screen' : 'h-[calc(100vh-72px)]'
       } overflow-hidden`}
     >
       {/* TOP CHART TOOLBAR */}
@@ -998,6 +1112,27 @@ export function ChartWorkspace() {
         <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
+            onClick={handleUndo}
+            disabled={!canUndo}
+            title="Undo Drawing (Ctrl+Z)"
+            className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)] disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+          >
+            <Undo2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={handleRedo}
+            disabled={!canRedo}
+            title="Redo Drawing (Ctrl+Y)"
+            className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)] disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+          >
+            <Redo2 className="w-3.5 h-3.5" />
+          </button>
+
+          <div className="h-4 w-px bg-[var(--border-subtle)] mx-0.5" />
+
+          <button
+            type="button"
             onClick={() => issueNav('zoom_in')}
             title="Zoom In"
             className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)] cursor-pointer"
@@ -1039,6 +1174,15 @@ export function ChartWorkspace() {
           >
             <BellPlus className="w-3.5 h-3.5" />
             <span className="hidden md:inline">Alert</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleScreenshot}
+            title="Save Chart Screenshot (PNG)"
+            className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)] cursor-pointer"
+          >
+            <Camera className="w-3.5 h-3.5" />
           </button>
 
           <button
@@ -1152,6 +1296,9 @@ export function ChartWorkspace() {
               onCancelTool={() => setActiveTool('cursor')}
               onToggleIndicator={toggleIndicator}
               onOpenIndicators={() => setIndicatorsModalOpen(true)}
+              onRegisterExportPng={(fn) => {
+                exportPngRef.current = fn;
+              }}
             />
 
             {/* Floating Chart Navigation Controls Bar (Bottom-Center of Chart) */}
@@ -1220,31 +1367,47 @@ export function ChartWorkspace() {
             </div>
           </div>
 
-          {/* BOTTOM PANEL */}
+          {/* BOTTOM MULTI-TAB TRADING & BAR INFO PANEL */}
           <div className="shrink-0 bg-[var(--bg-surface)] border-t border-[var(--border-subtle)]">
-            <div className="h-7 px-3 flex items-center justify-between text-[11px]">
-              <div className="flex items-center gap-3 overflow-x-auto whitespace-nowrap">
-                <span className="font-semibold text-[var(--text-primary)]">
-                  {instrument.name} ({instrument.symbol})
-                </span>
-                <span className="text-[var(--text-muted)]">·</span>
-                <span className="text-[var(--text-secondary)]">
-                  Session: <span className="text-[var(--text-primary)] font-medium">{instrument.status}</span>
-                </span>
-                <span className="text-[var(--text-muted)]">·</span>
-                <span className="text-[var(--text-secondary)]">
-                  TF: <span className="font-mono text-[var(--text-primary)]">{timeframe}</span>
-                </span>
+            <div className="h-7 px-2.5 flex items-center justify-between text-[11px] gap-2">
+              <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap">
+                {(
+                  [
+                    { id: 'ohlc', label: 'Bar OHLC' },
+                    { id: 'trade', label: 'Trading Panel' },
+                    { id: 'positions', label: `Open Positions (${openPositions.length})` },
+                    { id: 'orders', label: `Orders (${workingOrders.length})` },
+                    { id: 'history', label: 'Trade History' },
+                    { id: 'account', label: 'Account Summary' },
+                  ] as const
+                ).map((tab) => {
+                  const active = bottomTab === tab.id && bottomPanelOpen;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => {
+                        setBottomTab(tab.id);
+                        setBottomPanelOpen(true);
+                      }}
+                      className={`h-5 px-2 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                        active
+                          ? 'bg-[#2962FF]/15 text-[#2962FF]'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)]'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
                 {activeToolDef && (
-                  <>
-                    <span className="text-[var(--text-muted)]">·</span>
-                    <span className="text-[#2962FF] font-medium">
-                      Drawing: {activeToolDef.name}
-                    </span>
-                  </>
+                  <span className="ml-2 text-[#2962FF] font-medium">
+                    · Drawing: {activeToolDef.name}
+                  </span>
                 )}
               </div>
-              <div className="flex items-center gap-2 shrink-0 ml-2">
+
+              <div className="flex items-center gap-2 shrink-0">
                 {/* Chart Timezone Clock & Selector */}
                 <div ref={timezoneMenuRef} className="relative">
                   {(() => {
@@ -1310,12 +1473,12 @@ export function ChartWorkspace() {
                   className="flex items-center gap-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
                 >
                   {bottomPanelOpen ? <PanelBottomClose className="w-3.5 h-3.5" /> : <PanelBottomOpen className="w-3.5 h-3.5" />}
-                  <span className="hidden sm:inline">{bottomPanelOpen ? 'Minimize' : 'Details'}</span>
+                  <span className="hidden sm:inline">{bottomPanelOpen ? 'Minimize' : 'Expand'}</span>
                 </button>
               </div>
             </div>
 
-            {bottomPanelOpen && displayBar && (
+            {bottomPanelOpen && bottomTab === 'ohlc' && displayBar && (
               <div className="px-3 py-2 border-t border-[var(--border-subtle)] bg-[var(--bg-panel)] grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 text-[11px]">
                 <div>
                   <span className="text-[var(--text-muted)] block">Open / Close</span>
@@ -1338,7 +1501,7 @@ export function ChartWorkspace() {
                 <div>
                   <span className="text-[var(--text-muted)] block">Active Indicators</span>
                   <span className="text-[var(--text-primary)] truncate block">
-                    {enabledIndicators.map((i) => i.shortName).join(', ') || 'None'}
+                    {enabledIndicators.map((i) => i.shortName).join(', ') || 'None (Chart Only)'}
                   </span>
                 </div>
                 <div>
@@ -1362,6 +1525,274 @@ export function ChartWorkspace() {
                   >
                     Full Technical Breakdown →
                   </button>
+                </div>
+              </div>
+            )}
+
+            {bottomPanelOpen && bottomTab === 'trade' && (
+              <div className="px-3 py-2.5 border-t border-[var(--border-subtle)] bg-[var(--bg-panel)] flex flex-wrap items-end gap-2.5 text-[11px]">
+                <div className="min-w-[110px]">
+                  <span className="block text-[10px] text-[var(--text-muted)] mb-1">Order Type</span>
+                  <select
+                    value={quickOrderType}
+                    onChange={(e) => setQuickOrderType(e.target.value as OrderType)}
+                    className="h-7 px-2 w-full rounded bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)]"
+                  >
+                    <option value="Market">Market</option>
+                    <option value="Limit">Limit</option>
+                    <option value="Stop">Stop</option>
+                  </select>
+                </div>
+                <div className="w-24">
+                  <span className="block text-[10px] text-[var(--text-muted)] mb-1">Units / Lots</span>
+                  <input
+                    type="number"
+                    step="any"
+                    min="0.01"
+                    value={quickQty}
+                    onChange={(e) => setQuickQty(e.target.value)}
+                    className="h-7 px-2 w-full rounded bg-[var(--bg-canvas)] border border-[var(--border-subtle)] font-mono text-xs text-[var(--text-primary)]"
+                  />
+                </div>
+                {quickOrderType !== 'Market' && (
+                  <div className="w-28">
+                    <span className="block text-[10px] text-[var(--text-muted)] mb-1">{quickOrderType} Price</span>
+                    <input
+                      type="number"
+                      step="any"
+                      placeholder={formatPrice(instrument.price, instrument.decimals)}
+                      value={quickLimitPx}
+                      onChange={(e) => setQuickLimitPx(e.target.value)}
+                      className="h-7 px-2 w-full rounded bg-[var(--bg-canvas)] border border-[var(--border-subtle)] font-mono text-xs text-[var(--text-primary)]"
+                    />
+                  </div>
+                )}
+                <div className="w-24">
+                  <span className="block text-[10px] text-[var(--text-muted)] mb-1">Stop Loss</span>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="Optional"
+                    value={quickSl}
+                    onChange={(e) => setQuickSl(e.target.value)}
+                    className="h-7 px-2 w-full rounded bg-[var(--bg-canvas)] border border-[var(--border-subtle)] font-mono text-xs text-[var(--text-primary)]"
+                  />
+                </div>
+                <div className="w-24">
+                  <span className="block text-[10px] text-[var(--text-muted)] mb-1">Take Profit</span>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="Optional"
+                    value={quickTp}
+                    onChange={(e) => setQuickTp(e.target.value)}
+                    className="h-7 px-2 w-full rounded bg-[var(--bg-canvas)] border border-[var(--border-subtle)] font-mono text-xs text-[var(--text-primary)]"
+                  />
+                </div>
+                <div className="flex items-center gap-2 ml-auto">
+                  <button
+                    type="button"
+                    onClick={() => handleQuickOrder('Sell')}
+                    className="h-7 px-3 rounded bg-[#F23645] hover:bg-[#D92D3C] text-white font-semibold text-xs font-mono cursor-pointer whitespace-nowrap"
+                  >
+                    SELL {formatPrice(instrument.bid, instrument.decimals)}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleQuickOrder('Buy')}
+                    className="h-7 px-3 rounded bg-[#089981] hover:bg-[#07826E] text-white font-semibold text-xs font-mono cursor-pointer whitespace-nowrap"
+                  >
+                    BUY {formatPrice(instrument.ask, instrument.decimals)}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bottomPanelOpen && bottomTab === 'positions' && (
+              <div className="max-h-36 overflow-y-auto border-t border-[var(--border-subtle)] bg-[var(--bg-panel)]">
+                {openPositions.length === 0 ? (
+                  <div className="py-4 text-center text-[11px] text-[var(--text-muted)]">
+                    No open positions. Use Trading Panel to submit an order.
+                  </div>
+                ) : (
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="border-b border-[var(--border-subtle)] text-[var(--text-muted)]">
+                        <th className="text-left font-medium px-3 py-1.5">Symbol</th>
+                        <th className="text-left font-medium px-2 py-1.5">Side</th>
+                        <th className="text-right font-medium px-2 py-1.5">Qty</th>
+                        <th className="text-right font-medium px-2 py-1.5">Entry</th>
+                        <th className="text-right font-medium px-2 py-1.5">Mark</th>
+                        <th className="text-right font-medium px-2 py-1.5">Unrealized P&L</th>
+                        <th className="text-right font-medium px-3 py-1.5">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--border-subtle)]/60">
+                      {openPositions.map((pos) => {
+                        const inst = instruments.find((i) => i.symbol === pos.symbol);
+                        const mark = inst?.price ?? pos.entryPrice;
+                        const dec = inst?.decimals ?? 2;
+                        const pnl = computePositionUnrealizedPnl(pos, mark);
+                        return (
+                          <tr key={pos.id} className="hover:bg-[var(--bg-surface)]/50">
+                            <td className="px-3 py-1.5 font-mono font-semibold text-[var(--text-primary)]">{pos.symbol}</td>
+                            <td className={`px-2 py-1.5 font-medium ${pos.side === 'Buy' ? 'text-[#089981]' : 'text-[#F23645]'}`}>
+                              {pos.side}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono tabular-nums">{pos.quantity}</td>
+                            <td className="px-2 py-1.5 text-right font-mono tabular-nums text-[var(--text-secondary)]">
+                              {formatPrice(pos.entryPrice, dec)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono tabular-nums text-[var(--text-primary)]">
+                              {formatPrice(mark, dec)}
+                            </td>
+                            <td className={`px-2 py-1.5 text-right font-mono tabular-nums font-semibold ${pnl >= 0 ? 'text-[#089981]' : 'text-[#F23645]'}`}>
+                              {pnl >= 0 ? '+' : '-'}${Math.abs(pnl).toFixed(2)}
+                            </td>
+                            <td className="px-3 py-1.5 text-right">
+                              <button
+                                type="button"
+                                onClick={() => closePosition(pos.id)}
+                                className="px-2 py-0.5 rounded bg-[#F23645]/12 text-[#F23645] hover:bg-[#F23645]/20 cursor-pointer"
+                              >
+                                Close
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+
+            {bottomPanelOpen && bottomTab === 'orders' && (
+              <div className="max-h-36 overflow-y-auto border-t border-[var(--border-subtle)] bg-[var(--bg-panel)]">
+                {workingOrders.length === 0 ? (
+                  <div className="py-4 text-center text-[11px] text-[var(--text-muted)]">
+                    No active Limit or Stop orders working.
+                  </div>
+                ) : (
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="border-b border-[var(--border-subtle)] text-[var(--text-muted)]">
+                        <th className="text-left font-medium px-3 py-1.5">Symbol</th>
+                        <th className="text-left font-medium px-2 py-1.5">Order</th>
+                        <th className="text-right font-medium px-2 py-1.5">Qty</th>
+                        <th className="text-right font-medium px-2 py-1.5">Trigger Price</th>
+                        <th className="text-right font-medium px-2 py-1.5">Created</th>
+                        <th className="text-right font-medium px-3 py-1.5">Cancel</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--border-subtle)]/60">
+                      {workingOrders.map((ord) => {
+                        const dec = instruments.find((i) => i.symbol === ord.symbol)?.decimals ?? 2;
+                        return (
+                          <tr key={ord.id}>
+                            <td className="px-3 py-1.5 font-mono font-semibold text-[var(--text-primary)]">{ord.symbol}</td>
+                            <td className={`px-2 py-1.5 font-medium ${ord.side === 'Buy' ? 'text-[#089981]' : 'text-[#F23645]'}`}>
+                              {ord.side} {ord.type}
+                            </td>
+                            <td className="px-2 py-1.5 text-right font-mono tabular-nums">{ord.quantity}</td>
+                            <td className="px-2 py-1.5 text-right font-mono tabular-nums">{formatPrice(ord.limitOrStopPrice, dec)}</td>
+                            <td className="px-2 py-1.5 text-right font-mono text-[var(--text-muted)]">{ord.createdAt}</td>
+                            <td className="px-3 py-1.5 text-right">
+                              <button
+                                type="button"
+                                onClick={() => cancelOrder(ord.id)}
+                                title="Cancel Order"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] hover:text-[#F23645] cursor-pointer"
+                              >
+                                <X className="w-3 h-3" />
+                                Cancel
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+
+            {bottomPanelOpen && bottomTab === 'history' && (
+              <div className="max-h-36 overflow-y-auto border-t border-[var(--border-subtle)] bg-[var(--bg-panel)]">
+                <table className="w-full text-[11px]">
+                  <thead>
+                    <tr className="border-b border-[var(--border-subtle)] text-[var(--text-muted)]">
+                      <th className="text-left font-medium px-3 py-1.5">Time</th>
+                      <th className="text-left font-medium px-2 py-1.5">Symbol</th>
+                      <th className="text-left font-medium px-2 py-1.5">Side</th>
+                      <th className="text-right font-medium px-2 py-1.5">Qty</th>
+                      <th className="text-right font-medium px-2 py-1.5">Fill Price</th>
+                      <th className="text-right font-medium px-3 py-1.5">Realized P&L</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border-subtle)]/60">
+                    {tradeHistory.slice(0, 8).map((tr) => {
+                      const dec = instruments.find((i) => i.symbol === tr.symbol)?.decimals ?? 2;
+                      return (
+                        <tr key={tr.id}>
+                          <td className="px-3 py-1.5 font-mono text-[var(--text-muted)]">{tr.executedAt}</td>
+                          <td className="px-2 py-1.5 font-mono font-semibold text-[var(--text-primary)]">{tr.symbol}</td>
+                          <td className={`px-2 py-1.5 font-medium ${tr.side === 'Buy' ? 'text-[#089981]' : 'text-[#F23645]'}`}>
+                            {tr.side} ({tr.type})
+                          </td>
+                          <td className="px-2 py-1.5 text-right font-mono tabular-nums">{tr.quantity}</td>
+                          <td className="px-2 py-1.5 text-right font-mono tabular-nums">{formatPrice(tr.fillPrice, dec)}</td>
+                          <td className={`px-3 py-1.5 text-right font-mono tabular-nums ${
+                            tr.realizedPnl === undefined
+                              ? 'text-[var(--text-muted)]'
+                              : tr.realizedPnl >= 0
+                              ? 'text-[#089981]'
+                              : 'text-[#F23645]'
+                          }`}>
+                            {tr.realizedPnl === undefined
+                              ? tr.status
+                              : `${tr.realizedPnl >= 0 ? '+' : '-'}$${Math.abs(tr.realizedPnl).toFixed(2)}`}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {bottomPanelOpen && bottomTab === 'account' && (
+              <div className="px-3 py-2 border-t border-[var(--border-subtle)] bg-[var(--bg-panel)] grid grid-cols-2 sm:grid-cols-5 gap-3 text-[11px] font-mono tabular-nums">
+                <div>
+                  <span className="font-sans text-[var(--text-muted)] block">Account Balance</span>
+                  <span className="text-[var(--text-primary)] font-semibold">
+                    ${accountSummary.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div>
+                  <span className="font-sans text-[var(--text-muted)] block">Equity</span>
+                  <span className="text-[var(--text-primary)] font-semibold">
+                    ${accountSummary.equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div>
+                  <span className="font-sans text-[var(--text-muted)] block">Unrealized P&L</span>
+                  <span className={accountSummary.unrealizedPnl >= 0 ? 'text-[#089981] font-semibold' : 'text-[#F23645] font-semibold'}>
+                    {accountSummary.unrealizedPnl >= 0 ? '+' : '-'}$
+                    {Math.abs(accountSummary.unrealizedPnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div>
+                  <span className="font-sans text-[var(--text-muted)] block">Used Margin</span>
+                  <span className="text-[var(--text-primary)]">
+                    ${accountSummary.usedMargin.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div>
+                  <span className="font-sans text-[var(--text-muted)] block">Free Margin</span>
+                  <span className="text-[#089981]">
+                    ${accountSummary.freeMargin.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
                 </div>
               </div>
             )}
@@ -1558,7 +1989,7 @@ export function ChartWorkspace() {
                 </div>
 
                 {/* Symbol Price Alerts */}
-                <div className="p-3 space-y-2">
+                <div className="p-3 border-b border-[var(--border-subtle)] space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-[var(--text-primary)]">
                       Price Alerts ({symbolAlerts.length})
@@ -1601,6 +2032,41 @@ export function ChartWorkspace() {
                     </div>
                   )}
                 </div>
+
+                {/* Recent Market News */}
+                <div className="p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--text-primary)]">
+                      <Newspaper className="w-3.5 h-3.5 text-[#2962FF]" />
+                      Recent News
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveScreen('news')}
+                      className="text-[11px] text-[#2962FF] hover:underline cursor-pointer"
+                    >
+                      All →
+                    </button>
+                  </div>
+                  <div className="space-y-1.5">
+                    {symbolNews.slice(0, 3).map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setActiveScreen('news')}
+                        className="w-full p-2 rounded bg-[var(--bg-canvas)] border border-[var(--border-subtle)] hover:border-[var(--border-strong)] text-left transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center justify-between text-[10px] text-[var(--text-muted)]">
+                          <span>{item.source}</span>
+                          <span>{item.publishedAt}</span>
+                        </div>
+                        <p className="text-[11px] font-medium text-[var(--text-primary)] mt-1 line-clamp-2 leading-snug">
+                          {item.title}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
           </aside>
@@ -1634,68 +2100,21 @@ export function ChartWorkspace() {
         )}
       </div>
 
-      {/* Indicators Modal */}
-      <Modal
+      {/* Upgraded Technical Indicators Selector Modal */}
+      <IndicatorSelectorModal
         open={indicatorsModalOpen}
         onClose={() => setIndicatorsModalOpen(false)}
-        title="Technical Indicators & Chart Lines"
-        subtitle={`Add or remove overlay lines, volume bars, and lower chart oscillators for ${instrument.symbol}`}
-      >
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-2 pb-2 border-b border-[var(--border-subtle)]">
-            <span className="text-[11px] text-[var(--text-secondary)]">
-              {enabledIndicators.length === 0
-                ? 'Clean chart mode — candlesticks only'
-                : `${enabledIndicators.length} active on chart`}
-            </span>
-            <div className="flex items-center gap-1.5">
-              <Button size="xs" variant="secondary" onClick={enableStandardIndicators}>
-                Standard Lines
-              </Button>
-              <Button
-                size="xs"
-                variant="ghost"
-                onClick={clearAllIndicators}
-                disabled={enabledIndicators.length === 0}
-              >
-                Remove All (Chart Only)
-              </Button>
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            {indicators.map((ind) => (
-              <label
-                key={ind.id}
-                className="flex items-center justify-between p-2.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:bg-[var(--bg-panel)] cursor-pointer transition-colors"
-              >
-                <div className="flex items-center gap-2.5">
-                  <span
-                    className="w-2.5 h-2.5 rounded-full shrink-0"
-                    style={{ backgroundColor: ind.color }}
-                  />
-                  <div>
-                    <div className="text-xs font-medium text-[var(--text-primary)]">{ind.label}</div>
-                    <div className="text-[11px] text-[var(--text-muted)]">
-                      {ind.id === 'volume'
-                        ? 'Bottom Candle Overlay'
-                        : ind.category === 'Oscillator'
-                        ? 'Lower Sub-Pane Below Chart'
-                        : 'Price Chart Line'}
-                    </div>
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={ind.enabled}
-                  onChange={() => toggleIndicator(ind.id)}
-                  className="w-4 h-4 accent-[#2962FF] cursor-pointer"
-                />
-              </label>
-            ))}
-          </div>
-        </div>
-      </Modal>
+        symbol={instrument.symbol}
+        indicators={indicators}
+        favoriteIds={favoriteIndicatorIds}
+        recentIds={recentIndicatorIds}
+        onToggleIndicator={toggleIndicator}
+        onToggleFavorite={toggleFavoriteIndicator}
+        onUpdateIndicator={updateIndicatorConfig}
+        onResetIndicator={resetIndicatorConfig}
+        onEnableStandard={enableStandardIndicators}
+        onClearAll={clearAllIndicators}
+      />
 
       {/* Compare Symbol Modal */}
       <Modal

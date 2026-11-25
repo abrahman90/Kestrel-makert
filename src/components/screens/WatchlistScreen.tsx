@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { BellPlus, CandlestickChart, FolderPlus, Plus, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowUp, BellPlus, CandlestickChart, FolderPlus, Pencil, Plus, Trash2 } from 'lucide-react';
 import { usePlatform } from '../../context/PlatformContext';
 import { formatPrice } from '../../utils/indicators';
 import {
@@ -19,9 +19,11 @@ export function WatchlistScreen() {
     activeWatchlistId,
     setActiveWatchlistId,
     createWatchlist,
+    renameWatchlist,
     deleteWatchlist,
     addSymbolToWatchlist,
     removeSymbolFromWatchlist,
+    reorderWatchlistSymbol,
     instruments,
     openChart,
     openCreateAlertModal,
@@ -29,6 +31,8 @@ export function WatchlistScreen() {
 
   const [newListModalOpen, setNewListModalOpen] = useState(false);
   const [newListName, setNewListName] = useState('');
+  const [renameModalOpen, setRenameModalOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
   const [symbolToAdd, setSymbolToAdd] = useState(instruments[0].symbol);
 
   const activeWatchlist =
@@ -87,6 +91,19 @@ export function WatchlistScreen() {
                     ({wl.symbols.length})
                   </span>
                 </button>
+                {active && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRenameValue(wl.name);
+                      setRenameModalOpen(true);
+                    }}
+                    title="Rename watchlist"
+                    className="pr-1.5 py-1.5 opacity-60 hover:opacity-100 hover:text-[var(--text-primary)] cursor-pointer"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                )}
                 {watchlists.length > 1 && (
                   <button
                     type="button"
@@ -158,7 +175,7 @@ export function WatchlistScreen() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)]">
-                {watchlistInstruments.map((inst) => (
+                {watchlistInstruments.map((inst, idx) => (
                   <tr
                     key={inst.symbol}
                     onClick={() => openChart(inst.symbol)}
@@ -209,7 +226,25 @@ export function WatchlistScreen() {
                       </span>
                     </td>
                     <td className="px-4 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
-                      <div className="inline-flex items-center gap-1">
+                      <div className="inline-flex items-center gap-0.5">
+                        <button
+                          type="button"
+                          title="Move Up"
+                          disabled={idx === 0}
+                          onClick={() => reorderWatchlistSymbol(activeWatchlist.id, inst.symbol, 'up')}
+                          className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)] disabled:opacity-30 cursor-pointer"
+                        >
+                          <ArrowUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          title="Move Down"
+                          disabled={idx === watchlistInstruments.length - 1}
+                          onClick={() => reorderWatchlistSymbol(activeWatchlist.id, inst.symbol, 'down')}
+                          className="p-1.5 rounded text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-panel)] disabled:opacity-30 cursor-pointer"
+                        >
+                          <ArrowDown className="w-3.5 h-3.5" />
+                        </button>
                         <button
                           type="button"
                           title="Open Chart"
@@ -279,6 +314,44 @@ export function WatchlistScreen() {
             </Button>
             <Button type="submit" variant="primary">
               Create List
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Rename Watchlist Modal */}
+      <Modal
+        open={renameModalOpen}
+        onClose={() => setRenameModalOpen(false)}
+        title="Rename Watchlist"
+        subtitle={`Update title for "${activeWatchlist.name}"`}
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!renameValue.trim()) return;
+            renameWatchlist(activeWatchlist.id, renameValue);
+            setRenameModalOpen(false);
+          }}
+          className="space-y-4"
+        >
+          <div>
+            <label className="block text-[11px] font-medium text-[var(--text-secondary)] mb-1">
+              Watchlist Name
+            </label>
+            <Input
+              autoFocus
+              required
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={() => setRenameModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary">
+              Save Name
             </Button>
           </div>
         </form>

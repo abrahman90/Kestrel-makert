@@ -7,7 +7,10 @@ import React, { useState } from 'react';
 import { PlatformProvider, usePlatform } from './context/PlatformContext';
 import { TopNavBar } from './components/layout/TopNavBar';
 import { LeftSidebar } from './components/layout/LeftSidebar';
+import { BottomStatusBar } from './components/layout/BottomStatusBar';
+import { HelpModal } from './components/layout/HelpModal';
 import { CreateAlertModal, GlobalSearchModal } from './components/layout/GlobalModals';
+import { AuthModalOrScreen } from './components/auth/AuthModalOrScreen';
 import { ToastContainer } from './components/ui/DesignSystem';
 import { OverviewScreen } from './components/screens/OverviewScreen';
 import { ChartWorkspace } from './components/charts/ChartWorkspace';
@@ -19,6 +22,9 @@ import { AlertsScreen } from './components/screens/AlertsScreen';
 import { NewsScreen } from './components/screens/NewsScreen';
 import { CalendarScreen } from './components/screens/CalendarScreen';
 import { PortfolioScreen } from './components/screens/PortfolioScreen';
+import { TradingScreen } from './components/screens/TradingScreen';
+import { ReportsScreen } from './components/screens/ReportsScreen';
+import { AdminScreen } from './components/screens/AdminScreen';
 import { SettingsScreen } from './components/screens/SettingsScreen';
 
 function WorkspaceRouter() {
@@ -37,6 +43,8 @@ function WorkspaceRouter() {
       return <WatchlistScreen />;
     case 'technical':
       return <TechnicalAnalysisScreen />;
+    case 'trading':
+      return <TradingScreen />;
     case 'alerts':
       return <AlertsScreen />;
     case 'news':
@@ -45,6 +53,10 @@ function WorkspaceRouter() {
       return <CalendarScreen />;
     case 'portfolio':
       return <PortfolioScreen />;
+    case 'reports':
+      return <ReportsScreen />;
+    case 'admin':
+      return <AdminScreen />;
     case 'settings':
       return <SettingsScreen />;
     default:
@@ -78,8 +90,12 @@ function PlatformShell() {
         </main>
       </div>
 
+      <BottomStatusBar />
+
       <GlobalSearchModal />
       <CreateAlertModal />
+      <HelpModal />
+      <AuthModalOrScreen />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );

@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   Activity,
+  ArrowLeftRight,
   BarChart3,
   BellRing,
   Briefcase,
@@ -8,11 +9,13 @@ import {
   CandlestickChart,
   ChevronLeft,
   ChevronRight,
+  FileBarChart2,
   Filter,
   Globe2,
   LayoutDashboard,
   Newspaper,
   Settings,
+  Shield,
   Star,
   X,
 } from 'lucide-react';
@@ -32,10 +35,13 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'screener', label: 'Market Screener', icon: Filter },
   { id: 'watchlists', label: 'Watchlists', icon: Star },
   { id: 'technical', label: 'Technical Analysis', icon: Activity },
+  { id: 'trading', label: 'Trading', icon: ArrowLeftRight },
+  { id: 'portfolio', label: 'Portfolio', icon: Briefcase },
   { id: 'alerts', label: 'Price Alerts', icon: BellRing },
   { id: 'news', label: 'Market News', icon: Newspaper },
   { id: 'calendar', label: 'Economic Calendar', icon: Calendar },
-  { id: 'portfolio', label: 'Portfolio', icon: Briefcase },
+  { id: 'reports', label: 'Reports', icon: FileBarChart2 },
+  { id: 'admin', label: 'Admin Console', icon: Shield },
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
@@ -50,7 +56,7 @@ export function LeftSidebar({
   mobileOpen: boolean;
   onCloseMobile: () => void;
 }) {
-  const { activeScreen, setActiveScreen, alerts } = usePlatform();
+  const { activeScreen, setActiveScreen, alerts, openPositions } = usePlatform();
   const activeAlertCount = alerts.filter((a) => a.status === 'Active').length;
 
   const handleSelect = (id: NavSection) => {
@@ -83,6 +89,11 @@ export function LeftSidebar({
               {!isCompact && item.id === 'alerts' && activeAlertCount > 0 && (
                 <span className="font-mono tabular-nums text-[11px] text-[var(--text-muted)]">
                   {activeAlertCount}
+                </span>
+              )}
+              {!isCompact && item.id === 'trading' && openPositions.length > 0 && (
+                <span className="font-mono tabular-nums text-[11px] text-[#089981]">
+                  {openPositions.length}
                 </span>
               )}
             </button>

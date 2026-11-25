@@ -15,12 +15,19 @@ import {
 } from '../../data/drawingToolsCatalog';
 import { getDefaultConfigForTool } from '../../data/drawingTemplatesCatalog';
 import {
+  calculateATR,
   calculateBollingerBands,
+  calculateCCI,
   calculateEMA,
   calculateHeikinAshi,
+  calculateIchimoku,
+  calculateKeltnerChannels,
   calculateMACD,
+  calculateOBV,
   calculateRSI,
   calculateSMA,
+  calculateStochastic,
+  calculateVolumeProfile,
   formatPrice,
 } from '../../utils/indicators';
 import {
@@ -72,6 +79,7 @@ interface TradingChartCanvasProps {
   onCancelTool: () => void;
   onToggleIndicator?: (id: IndicatorConfig['id']) => void;
   onOpenIndicators?: () => void;
+  onRegisterExportPng?: (fn: (() => void) | null) => void;
 }
 
 interface PendingPoint {
@@ -155,9 +163,26 @@ export function TradingChartCanvas({
   onCancelTool,
   onToggleIndicator,
   onOpenIndicators,
+  onRegisterExportPng,
 }: TradingChartCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (!onRegisterExportPng) return;
+    onRegisterExportPng(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const dataUrl = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.href = dataUrl;
+      link.download = `kestrel-${instrument.symbol.replace('/', '-')}-${timeframe}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    });
+    return () => onRegisterExportPng(null);
+  }, [onRegisterExportPng, instrument.symbol, timeframe]);
 
   const [size, setSize] = useState({ width: 900, height: 520 });
   const [legendCollapsed, setLegendCollapsed] = useState(false);
@@ -310,15 +335,76 @@ export function TradingChartCanvas({
   const closes = useMemo(() => displayCandles.map((c) => c.close), [displayCandles]);
 
   const indicatorSeries = useMemo(() => {
-    const ema20 = indicators.find((i) => i.id === 'ema20')?.enabled ? calculateEMA(closes, 20) : null;
-    const ema50 = indicators.find((i) => i.id === 'ema50')?.enabled ? calculateEMA(closes, 50) : null;
-    const sma200 = indicators.find((i) => i.id === 'sma200')?.enabled ? calculateSMA(closes, 100) : null;
-    const bb = indicators.find((i) => i.id === 'bb')?.enabled ? calculateBollingerBands(closes, 20, 2) : null;
-    const rsi = indicators.find((i) => i.id === 'rsi')?.enabled ? calculateRSI(closes, 14) : null;
-    const macd = indicators.find((i) => i.id === 'macd')?.enabled ? calculateMACD(closes, 12, 26, 9) : null;
-    const volumeEnabled = indicators.find((i) => i.id === 'volume')?.enabled ?? true;
-    return { ema20, ema50, sma200, bb, rsi, macd, volumeEnabled };
-  }, [closes, indicators]);
+    const get = (id: IndicatorConfig['id']) => indicators.find((i) => i.id === id);
+    const ema20Cfg = get('ema20');
+    const ema50Cfg = get('ema50');
+    const sma200Cfg = get('sma200');
+    const bbCfg = get('bb');
+    const keltnerCfg = get('keltner');
+    const ichiCfg = get('ichimoku');
+    const vpCfg = get('vp');
+    const rsiCfg = get('rsi');
+    const macdCfg = get('macd');
+    const stochCfg = get('stoch');
+    const cciCfg = get('cci');
+    const atrCfg = get('atr');
+    const obvCfg = get('obv');
+    const volCfg = get('volume');
+
+    return {
+      ema20: ema20Cfg?.enabled ? { data: calculateEMA(closes, ema20Cfg.params.period ?? 20), color: ema20Cfg.color } : null,
+      ema50: ema50Cfg?.enabled ? { data: calculateEMA(closes, ema50Cfg.params.period ?? 50), color: ema50Cfg.color } : null,
+      sma200: sma200Cfg?.enabled ? { data: calculateSMA(closes, sma200Cfg.params.period ?? 100), color: sma200Cfg.color } : null,
+      bb: bbCfg?.enabled
+        ? {
+            ...calculateBollingerBands(closes, bbCfg.params.period ?? 20, bbCfg.params.mult ?? 2),
+            color: bbCfg.color,
+          }
+        : null,
+      keltner: keltnerCfg?.enabled
+        ? {
+            ...calculateKeltnerChannels(
+              displayCandles,
+              keltnerCfg.params.period ?? 20,
+              keltnerCfg.params.atrPeriod ?? 10,
+              keltnerCfg.params.mult ?? 2
+            ),
+            color: keltnerCfg.color,
+          }
+        : null,
+      ichimoku: ichiCfg?.enabled
+        ? calculateIchimoku(
+            displayCandles,
+            ichiCfg.params.tenkan ?? 9,
+            ichiCfg.params.kijun ?? 26,
+            ichiCfg.params.senkouB ?? 52
+          )
+        : null,
+      vpEnabled: Boolean(vpCfg?.enabled),
+      vpColor: vpCfg?.color ?? '#2962FF',
+      rsi: rsiCfg?.enabled ? { data: calculateRSI(closes, rsiCfg.params.period ?? 14), color: rsiCfg.color, period: rsiCfg.params.period ?? 14 } : null,
+      macd: macdCfg?.enabled
+        ? {
+            ...calculateMACD(closes, macdCfg.params.fast ?? 12, macdCfg.params.slow ?? 26, macdCfg.params.signal ?? 9),
+            color: macdCfg.color,
+          }
+        : null,
+      stoch: stochCfg?.enabled
+        ? {
+            ...calculateStochastic(displayCandles, stochCfg.params.kPeriod ?? 14, stochCfg.params.dPeriod ?? 3),
+            color: stochCfg.color,
+          }
+        : null,
+      cci: cciCfg?.enabled
+        ? { data: calculateCCI(displayCandles, cciCfg.params.period ?? 20), color: cciCfg.color, period: cciCfg.params.period ?? 20 }
+        : null,
+      atr: atrCfg?.enabled
+        ? { data: calculateATR(displayCandles, atrCfg.params.period ?? 14), color: atrCfg.color, period: atrCfg.params.period ?? 14 }
+        : null,
+      obv: obvCfg?.enabled ? { data: calculateOBV(displayCandles), color: obvCfg.color } : null,
+      volumeEnabled: volCfg?.enabled ?? false,
+    };
+  }, [closes, displayCandles, indicators]);
 
   // Viewport slice indices
   const totalBars = displayCandles.length;
@@ -326,17 +412,22 @@ export function TradingChartCanvas({
   const startIndex = Math.max(0, endIndex - visibleCount);
   const actualCount = Math.max(1, endIndex - startIndex);
 
-  const hasRsi = Boolean(indicatorSeries.rsi);
-  const hasMacd = Boolean(indicatorSeries.macd);
-  const subPaneCount = (hasRsi ? 1 : 0) + (hasMacd ? 1 : 0);
+  const subPaneCount =
+    (indicatorSeries.rsi ? 1 : 0) +
+    (indicatorSeries.macd ? 1 : 0) +
+    (indicatorSeries.stoch ? 1 : 0) +
+    (indicatorSeries.cci ? 1 : 0) +
+    (indicatorSeries.atr ? 1 : 0) +
+    (indicatorSeries.obv ? 1 : 0);
 
   const priceAxisWidth = 76;
   const timeAxisHeight = 26;
   const topPad = 14;
   const plotWidth = Math.max(100, size.width - priceAxisWidth);
   const availableHeight = Math.max(120, size.height - timeAxisHeight - topPad);
-  const subPaneHeight = subPaneCount > 0 ? Math.min(80, Math.floor(availableHeight * 0.19)) : 0;
-  const mainPaneHeight = availableHeight - subPaneCount * (subPaneHeight + 6);
+  const subPaneHeight =
+    subPaneCount > 0 ? Math.max(46, Math.min(76, Math.floor((availableHeight * 0.44) / subPaneCount))) : 0;
+  const mainPaneHeight = Math.max(120, availableHeight - subPaneCount * (subPaneHeight + 6));
 
   const { minPrice, maxPrice } = useMemo(() => {
     let min = Infinity;
@@ -652,19 +743,19 @@ export function TradingChartCanvas({
     const palette =
       theme === 'dark'
         ? {
-            bg: '#131722',
-            grid: 'rgba(42, 46, 57, 0.72)',
-            axisBorder: '#2A2E39',
-            axisText: '#787B86',
-            crosshair: 'rgba(209, 212, 220, 0.35)',
-            crosshairBadgeBg: '#2A2E39',
-            crosshairBadgeText: '#D1D4DC',
+            bg: '#0B0E11',
+            grid: 'rgba(39, 49, 61, 0.72)',
+            axisBorder: '#27313D',
+            axisText: '#929EAD',
+            crosshair: 'rgba(232, 237, 243, 0.35)',
+            crosshairBadgeBg: '#1C2430',
+            crosshairBadgeText: '#E8EDF3',
             up: '#089981',
             down: '#F23645',
             line: '#2962FF',
             compare: '#F0B90B',
-            cardBg: '#1E222D',
-            cardText: '#D1D4DC',
+            cardBg: '#171D26',
+            cardText: '#E8EDF3',
           }
         : {
             bg: '#FFFFFF',
@@ -763,9 +854,9 @@ export function TradingChartCanvas({
     ctx.rect(0, topPad, plotWidth, mainPaneHeight);
     ctx.clip();
 
-    // Bollinger Bands
+    // Bollinger Bands & Keltner Channels & Ichimoku & Volume Profile
     if (indicatorSeries.bb) {
-      const { upper, middle, lower } = indicatorSeries.bb;
+      const { upper, middle, lower, color } = indicatorSeries.bb;
       ctx.beginPath();
       let started = false;
       for (let i = startIndex; i < endIndex; i++) {
@@ -784,11 +875,11 @@ export function TradingChartCanvas({
         ctx.lineTo(indexToX(i), priceToY(val));
       }
       ctx.closePath();
-      ctx.fillStyle = 'rgba(41, 98, 255, 0.08)';
+      ctx.fillStyle = hexToRgba(color, 0.08);
       ctx.fill();
 
-      const drawLineArr = (arr: (number | null)[], color: string) => {
-        ctx.strokeStyle = color;
+      const drawBandLine = (arr: (number | null)[], stroke: string) => {
+        ctx.strokeStyle = stroke;
         ctx.lineWidth = 1.2;
         ctx.beginPath();
         let active = false;
@@ -804,9 +895,88 @@ export function TradingChartCanvas({
         }
         ctx.stroke();
       };
-      drawLineArr(upper, 'rgba(41, 98, 255, 0.55)');
-      drawLineArr(middle, 'rgba(41, 98, 255, 0.85)');
-      drawLineArr(lower, 'rgba(41, 98, 255, 0.55)');
+      drawBandLine(upper, hexToRgba(color, 0.6));
+      drawBandLine(middle, hexToRgba(color, 0.9));
+      drawBandLine(lower, hexToRgba(color, 0.6));
+    }
+
+    if (indicatorSeries.keltner) {
+      const { upper, middle, lower, color } = indicatorSeries.keltner;
+      const drawKC = (arr: (number | null)[], dashed: boolean) => {
+        ctx.save();
+        ctx.strokeStyle = hexToRgba(color, dashed ? 0.72 : 0.92);
+        ctx.lineWidth = 1.25;
+        if (dashed) ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        let active = false;
+        for (let i = startIndex; i < endIndex; i++) {
+          const v = arr[i];
+          if (v === null) continue;
+          const x = indexToX(i);
+          const y = priceToY(v);
+          if (!active) {
+            ctx.moveTo(x, y);
+            active = true;
+          } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      };
+      drawKC(upper, true);
+      drawKC(middle, false);
+      drawKC(lower, true);
+    }
+
+    if (indicatorSeries.ichimoku) {
+      const { tenkan, kijun, senkouA, senkouB } = indicatorSeries.ichimoku;
+      for (let i = startIndex; i < endIndex - 1; i++) {
+        const a0 = senkouA[i];
+        const b0 = senkouB[i];
+        const a1 = senkouA[i + 1];
+        const b1 = senkouB[i + 1];
+        if (a0 === null || b0 === null || a1 === null || b1 === null) continue;
+        ctx.fillStyle = a0 >= b0 ? 'rgba(8, 153, 129, 0.14)' : 'rgba(242, 54, 69, 0.14)';
+        ctx.beginPath();
+        ctx.moveTo(indexToX(i), priceToY(a0));
+        ctx.lineTo(indexToX(i + 1), priceToY(a1));
+        ctx.lineTo(indexToX(i + 1), priceToY(b1));
+        ctx.lineTo(indexToX(i), priceToY(b0));
+        ctx.closePath();
+        ctx.fill();
+      }
+      const drawIchi = (arr: (number | null)[], stroke: string) => {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 1.25;
+        ctx.beginPath();
+        let active = false;
+        for (let i = startIndex; i < endIndex; i++) {
+          const v = arr[i];
+          if (v === null) continue;
+          const x = indexToX(i);
+          const y = priceToY(v);
+          if (!active) {
+            ctx.moveTo(x, y);
+            active = true;
+          } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      };
+      drawIchi(tenkan, '#2962FF');
+      drawIchi(kijun, '#F23645');
+    }
+
+    if (indicatorSeries.vpEnabled) {
+      const bins = calculateVolumeProfile(displayCandles, startIndex, endIndex, 18);
+      const maxBinVol = Math.max(1, ...bins.map((b) => b.volume));
+      const maxBarW = Math.min(110, plotWidth * 0.18);
+      bins.forEach((b) => {
+        const yTop = priceToY(b.priceHigh);
+        const yBot = priceToY(b.priceLow);
+        const h = Math.max(2, Math.abs(yBot - yTop) - 1);
+        const w = (b.volume / maxBinVol) * maxBarW;
+        ctx.fillStyle = b.isPoc ? 'rgba(240, 185, 11, 0.42)' : hexToRgba(indicatorSeries.vpColor, 0.22);
+        ctx.fillRect(plotWidth - w, Math.min(yTop, yBot), w, h);
+      });
     }
 
     // Candles / Hollow / Line / Area
@@ -872,14 +1042,14 @@ export function TradingChartCanvas({
     }
 
     // Moving Averages
-    const drawMA = (arr: (number | null)[] | null, color: string) => {
-      if (!arr) return;
-      ctx.strokeStyle = color;
+    const drawMA = (series: { data: (number | null)[]; color: string } | null) => {
+      if (!series) return;
+      ctx.strokeStyle = series.color;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       let started = false;
       for (let i = startIndex; i < endIndex; i++) {
-        const val = arr[i];
+        const val = series.data[i];
         if (val === null) continue;
         const x = indexToX(i);
         const y = priceToY(val);
@@ -890,9 +1060,9 @@ export function TradingChartCanvas({
       }
       ctx.stroke();
     };
-    drawMA(indicatorSeries.ema20, '#F0B90B');
-    drawMA(indicatorSeries.ema50, '#2962FF');
-    drawMA(indicatorSeries.sma200, '#AB47BC');
+    drawMA(indicatorSeries.ema20);
+    drawMA(indicatorSeries.ema50);
+    drawMA(indicatorSeries.sma200);
 
     // Compare Instrument
     if (compareInstrument && compareCandles && compareCandles.length === displayCandles.length) {
@@ -2157,7 +2327,7 @@ export function TradingChartCanvas({
     // Oscillator Sub-Panes
     let subOffsetY = topPad + mainPaneHeight + 6;
     if (indicatorSeries.rsi) {
-      const rsi = indicatorSeries.rsi;
+      const { data: rsi, color, period } = indicatorSeries.rsi;
       ctx.strokeStyle = palette.axisBorder;
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -2177,7 +2347,7 @@ export function TradingChartCanvas({
       });
       ctx.restore();
 
-      ctx.strokeStyle = '#AB47BC';
+      ctx.strokeStyle = color;
       ctx.lineWidth = 1.4;
       ctx.beginPath();
       let started = false;
@@ -2198,7 +2368,7 @@ export function TradingChartCanvas({
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       const lastRsi = rsi[rsi.length - 1];
-      ctx.fillText(`RSI(14) ${lastRsi !== null ? lastRsi.toFixed(1) : '—'}`, 8, subOffsetY + 4);
+      ctx.fillText(`RSI(${period}) ${lastRsi !== null ? lastRsi.toFixed(1) : '—'}`, 8, subOffsetY + 4);
       ctx.fillText('70', plotWidth + 8, rsiY(70) - 4);
       ctx.fillText('30', plotWidth + 8, rsiY(30) - 4);
 
@@ -2206,7 +2376,7 @@ export function TradingChartCanvas({
     }
 
     if (indicatorSeries.macd) {
-      const { macd, signal, histogram } = indicatorSeries.macd;
+      const { macd, signal, histogram, color } = indicatorSeries.macd;
       ctx.strokeStyle = palette.axisBorder;
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -2236,8 +2406,8 @@ export function TradingChartCanvas({
         ctx.fillRect(x - barW / 2, Math.min(zeroY, y), barW, Math.abs(y - zeroY));
       }
 
-      const drawOsc = (arr: (number | null)[], color: string) => {
-        ctx.strokeStyle = color;
+      const drawOsc = (arr: (number | null)[], stroke: string) => {
+        ctx.strokeStyle = stroke;
         ctx.lineWidth = 1.3;
         ctx.beginPath();
         let active = false;
@@ -2253,14 +2423,187 @@ export function TradingChartCanvas({
         }
         ctx.stroke();
       };
-      drawOsc(macd, '#2962FF');
+      drawOsc(macd, color);
       drawOsc(signal, '#F0B90B');
 
       ctx.fillStyle = palette.axisText;
       ctx.font = '10px "IBM Plex Mono", monospace';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
-      ctx.fillText('MACD(12,26,9)', 8, subOffsetY + 4);
+      ctx.fillText('MACD', 8, subOffsetY + 4);
+
+      subOffsetY += subPaneHeight + 6;
+    }
+
+    if (indicatorSeries.stoch) {
+      const { k, d, color } = indicatorSeries.stoch;
+      ctx.strokeStyle = palette.axisBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, subOffsetY);
+      ctx.lineTo(size.width, subOffsetY);
+      ctx.stroke();
+
+      const stY = (v: number) => subOffsetY + subPaneHeight - (v / 100) * subPaneHeight;
+      ctx.save();
+      ctx.strokeStyle = palette.grid;
+      ctx.setLineDash([3, 3]);
+      [80, 20].forEach((lvl) => {
+        ctx.beginPath();
+        ctx.moveTo(0, stY(lvl));
+        ctx.lineTo(plotWidth, stY(lvl));
+        ctx.stroke();
+      });
+      ctx.restore();
+
+      const drawSt = (arr: (number | null)[], stroke: string) => {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        let active = false;
+        for (let i = startIndex; i < endIndex; i++) {
+          const v = arr[i];
+          if (v === null) continue;
+          const x = indexToX(i);
+          const y = stY(v);
+          if (!active) {
+            ctx.moveTo(x, y);
+            active = true;
+          } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      };
+      drawSt(k, color);
+      drawSt(d, '#F0B90B');
+
+      ctx.fillStyle = palette.axisText;
+      ctx.font = '10px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const lastK = k[k.length - 1];
+      ctx.fillText(`Stoch %K ${lastK !== null ? lastK.toFixed(1) : '—'}`, 8, subOffsetY + 4);
+      ctx.fillText('80', plotWidth + 8, stY(80) - 4);
+      ctx.fillText('20', plotWidth + 8, stY(20) - 4);
+      subOffsetY += subPaneHeight + 6;
+    }
+
+    if (indicatorSeries.cci) {
+      const { data, color, period } = indicatorSeries.cci;
+      ctx.strokeStyle = palette.axisBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, subOffsetY);
+      ctx.lineTo(size.width, subOffsetY);
+      ctx.stroke();
+
+      let maxAbs = 150;
+      for (let i = startIndex; i < endIndex; i++) {
+        const v = data[i];
+        if (v !== null) maxAbs = Math.max(maxAbs, Math.abs(v));
+      }
+      const cciY = (v: number) => subOffsetY + subPaneHeight / 2 - (v / maxAbs) * (subPaneHeight * 0.42);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      let active = false;
+      for (let i = startIndex; i < endIndex; i++) {
+        const v = data[i];
+        if (v === null) continue;
+        const x = indexToX(i);
+        const y = cciY(v);
+        if (!active) {
+          ctx.moveTo(x, y);
+          active = true;
+        } else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.fillStyle = palette.axisText;
+      ctx.font = '10px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const lastCci = data[data.length - 1];
+      ctx.fillText(`CCI(${period}) ${lastCci !== null ? lastCci.toFixed(1) : '—'}`, 8, subOffsetY + 4);
+      subOffsetY += subPaneHeight + 6;
+    }
+
+    if (indicatorSeries.atr) {
+      const { data, color, period } = indicatorSeries.atr;
+      ctx.strokeStyle = palette.axisBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, subOffsetY);
+      ctx.lineTo(size.width, subOffsetY);
+      ctx.stroke();
+
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = startIndex; i < endIndex; i++) {
+        const v = data[i];
+        if (v !== null) {
+          lo = Math.min(lo, v);
+          hi = Math.max(hi, v);
+        }
+      }
+      const span = Math.max(1e-9, hi - lo);
+      const atrY = (v: number) => subOffsetY + subPaneHeight - ((v - lo) / span) * (subPaneHeight - 12) - 6;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      let active = false;
+      for (let i = startIndex; i < endIndex; i++) {
+        const v = data[i];
+        if (v === null) continue;
+        const x = indexToX(i);
+        const y = atrY(v);
+        if (!active) {
+          ctx.moveTo(x, y);
+          active = true;
+        } else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.fillStyle = palette.axisText;
+      ctx.font = '10px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const lastAtr = data[data.length - 1];
+      ctx.fillText(`ATR(${period}) ${lastAtr !== null ? formatPrice(lastAtr, instrument.decimals) : '—'}`, 8, subOffsetY + 4);
+      subOffsetY += subPaneHeight + 6;
+    }
+
+    if (indicatorSeries.obv) {
+      const { data, color } = indicatorSeries.obv;
+      ctx.strokeStyle = palette.axisBorder;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, subOffsetY);
+      ctx.lineTo(size.width, subOffsetY);
+      ctx.stroke();
+
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = startIndex; i < endIndex; i++) {
+        const v = data[i];
+        lo = Math.min(lo, v);
+        hi = Math.max(hi, v);
+      }
+      const span = Math.max(1, hi - lo);
+      const obvY = (v: number) => subOffsetY + subPaneHeight - ((v - lo) / span) * (subPaneHeight - 12) - 6;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      for (let i = startIndex; i < endIndex; i++) {
+        const x = indexToX(i);
+        const y = obvY(data[i]);
+        if (i === startIndex) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.fillStyle = palette.axisText;
+      ctx.font = '10px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText('OBV', 8, subOffsetY + 4);
+      subOffsetY += subPaneHeight + 6;
     }
 
     // Axis Dividers
